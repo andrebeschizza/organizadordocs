@@ -1,0 +1,663 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <title>Organizador de Documentos — AB Group</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        :root {
+            --azul: #1a3a5c;
+            --azul-claro: #2c5282;
+            --verde: #38a169;
+            --verde-claro: #48bb78;
+            --cinza-bg: #f7fafc;
+            --cinza-borda: #e2e8f0;
+            --cinza-texto: #4a5568;
+            --vermelho: #e53e3e;
+            --amarelo: #ecc94b;
+            --branco: #ffffff;
+            --sombra: 0 2px 8px rgba(0,0,0,0.08);
+            --raio: 12px;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: var(--cinza-bg);
+            color: #2d3748;
+            min-height: 100vh;
+            -webkit-font-smoothing: antialiased;
+        }
+
+        /* HEADER */
+        .header {
+            background: linear-gradient(135deg, var(--azul) 0%, var(--azul-claro) 100%);
+            color: white;
+            padding: 20px 16px;
+            text-align: center;
+            position: sticky;
+            top: 0;
+            z-index: 100;
+            box-shadow: 0 2px 12px rgba(0,0,0,0.15);
+        }
+        .header h1 {
+            font-size: 20px;
+            font-weight: 700;
+            letter-spacing: -0.3px;
+        }
+        .header p {
+            font-size: 13px;
+            opacity: 0.85;
+            margin-top: 4px;
+        }
+
+        /* CONTAINER */
+        .container {
+            max-width: 480px;
+            margin: 0 auto;
+            padding: 16px;
+        }
+
+        /* CARD */
+        .card {
+            background: var(--branco);
+            border-radius: var(--raio);
+            box-shadow: var(--sombra);
+            padding: 20px;
+            margin-bottom: 16px;
+        }
+        .card-title {
+            font-size: 14px;
+            font-weight: 600;
+            color: var(--azul);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-bottom: 12px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .card-title .num {
+            background: var(--azul);
+            color: white;
+            width: 24px;
+            height: 24px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 13px;
+            flex-shrink: 0;
+        }
+
+        /* FORM */
+        label {
+            display: block;
+            font-size: 14px;
+            font-weight: 500;
+            color: var(--cinza-texto);
+            margin-bottom: 6px;
+        }
+        input[type="text"], select {
+            width: 100%;
+            padding: 14px;
+            border: 2px solid var(--cinza-borda);
+            border-radius: 10px;
+            font-size: 16px;
+            background: var(--cinza-bg);
+            color: #2d3748;
+            transition: border-color 0.2s;
+            -webkit-appearance: none;
+        }
+        input[type="text"]:focus, select:focus {
+            outline: none;
+            border-color: var(--azul-claro);
+            background: white;
+        }
+        select {
+            cursor: pointer;
+            background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='20' height='20' viewBox='0 0 24 24' fill='none' stroke='%234a5568' stroke-width='2'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E");
+            background-repeat: no-repeat;
+            background-position: right 12px center;
+            padding-right: 40px;
+        }
+
+        /* DROP ZONE */
+        .drop-zone {
+            border: 2px dashed var(--cinza-borda);
+            border-radius: var(--raio);
+            padding: 30px 16px;
+            text-align: center;
+            cursor: pointer;
+            transition: all 0.3s;
+            background: var(--cinza-bg);
+        }
+        .drop-zone.active {
+            border-color: var(--azul-claro);
+            background: #ebf4ff;
+        }
+        .drop-zone.has-files {
+            border-color: var(--verde);
+            background: #f0fff4;
+        }
+        .drop-zone-icon {
+            font-size: 40px;
+            margin-bottom: 8px;
+        }
+        .drop-zone-text {
+            font-size: 15px;
+            color: var(--cinza-texto);
+            font-weight: 500;
+        }
+        .drop-zone-hint {
+            font-size: 12px;
+            color: #a0aec0;
+            margin-top: 4px;
+        }
+
+        /* FILE LIST */
+        .file-list {
+            margin-top: 12px;
+        }
+        .file-item {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 10px 12px;
+            background: var(--cinza-bg);
+            border-radius: 8px;
+            margin-bottom: 6px;
+            font-size: 13px;
+        }
+        .file-item .name {
+            flex: 1;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            color: var(--cinza-texto);
+        }
+        .file-item .size {
+            color: #a0aec0;
+            font-size: 12px;
+            margin-left: 8px;
+            flex-shrink: 0;
+        }
+        .file-item .remove {
+            color: var(--vermelho);
+            cursor: pointer;
+            margin-left: 8px;
+            font-size: 18px;
+            line-height: 1;
+            flex-shrink: 0;
+            padding: 4px;
+        }
+        .file-count {
+            font-size: 13px;
+            color: var(--verde);
+            font-weight: 600;
+            margin-top: 8px;
+        }
+
+        /* BOTAO */
+        .btn {
+            width: 100%;
+            padding: 16px;
+            border: none;
+            border-radius: 10px;
+            font-size: 16px;
+            font-weight: 700;
+            cursor: pointer;
+            transition: all 0.2s;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+        }
+        .btn-primary {
+            background: linear-gradient(135deg, var(--verde) 0%, var(--verde-claro) 100%);
+            color: white;
+            box-shadow: 0 4px 12px rgba(56, 161, 105, 0.3);
+        }
+        .btn-primary:active {
+            transform: scale(0.98);
+        }
+        .btn-primary:disabled {
+            background: #cbd5e0;
+            box-shadow: none;
+            cursor: not-allowed;
+        }
+        .btn-download {
+            background: linear-gradient(135deg, var(--azul) 0%, var(--azul-claro) 100%);
+            color: white;
+            box-shadow: 0 4px 12px rgba(26, 58, 92, 0.3);
+            text-decoration: none;
+        }
+        .btn-download:active {
+            transform: scale(0.98);
+        }
+        .btn-secondary {
+            background: var(--cinza-bg);
+            color: var(--cinza-texto);
+            border: 2px solid var(--cinza-borda);
+            margin-top: 8px;
+        }
+
+        /* PROGRESSO */
+        .progress-overlay {
+            display: none;
+            position: fixed;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: rgba(0,0,0,0.6);
+            z-index: 200;
+            align-items: center;
+            justify-content: center;
+        }
+        .progress-overlay.show {
+            display: flex;
+        }
+        .progress-box {
+            background: white;
+            border-radius: 16px;
+            padding: 32px 24px;
+            text-align: center;
+            width: 85%;
+            max-width: 320px;
+            box-shadow: 0 20px 40px rgba(0,0,0,0.2);
+        }
+        .spinner {
+            width: 48px;
+            height: 48px;
+            border: 4px solid var(--cinza-borda);
+            border-top-color: var(--azul);
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+            margin: 0 auto 16px;
+        }
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+        .progress-text {
+            font-size: 15px;
+            font-weight: 600;
+            color: var(--azul);
+        }
+        .progress-hint {
+            font-size: 13px;
+            color: #a0aec0;
+            margin-top: 6px;
+        }
+
+        /* RESULTADO */
+        .resultado {
+            display: none;
+        }
+        .resultado.show {
+            display: block;
+        }
+        .doc-resultado {
+            display: flex;
+            align-items: flex-start;
+            padding: 12px;
+            background: var(--cinza-bg);
+            border-radius: 8px;
+            margin-bottom: 6px;
+            gap: 10px;
+        }
+        .doc-resultado .ordem {
+            background: var(--azul);
+            color: white;
+            width: 28px;
+            height: 28px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 12px;
+            font-weight: 700;
+            flex-shrink: 0;
+        }
+        .doc-resultado .ordem.sem-data {
+            background: var(--amarelo);
+            color: #744210;
+        }
+        .doc-resultado .info {
+            flex: 1;
+            min-width: 0;
+        }
+        .doc-resultado .tipo {
+            font-size: 14px;
+            font-weight: 600;
+            color: #2d3748;
+        }
+        .doc-resultado .data {
+            font-size: 12px;
+            color: var(--verde);
+            font-weight: 500;
+            margin-top: 2px;
+        }
+        .doc-resultado .original {
+            font-size: 11px;
+            color: #a0aec0;
+            margin-top: 2px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .stats {
+            display: flex;
+            gap: 8px;
+            margin-bottom: 16px;
+        }
+        .stat {
+            flex: 1;
+            background: var(--cinza-bg);
+            border-radius: 10px;
+            padding: 12px;
+            text-align: center;
+        }
+        .stat .number {
+            font-size: 24px;
+            font-weight: 700;
+            color: var(--azul);
+        }
+        .stat .label {
+            font-size: 11px;
+            color: #a0aec0;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        /* ERRO */
+        .erro {
+            display: none;
+            background: #fff5f5;
+            border: 1px solid #fed7d7;
+            border-radius: 10px;
+            padding: 14px;
+            color: var(--vermelho);
+            font-size: 14px;
+            margin-bottom: 16px;
+        }
+        .erro.show {
+            display: block;
+        }
+
+        /* FOOTER */
+        .footer {
+            text-align: center;
+            padding: 20px;
+            font-size: 12px;
+            color: #a0aec0;
+        }
+
+        /* DESKTOP */
+        @media (min-width: 768px) {
+            .container { max-width: 560px; padding: 24px; }
+            .header h1 { font-size: 24px; }
+            .card { padding: 24px; }
+            .drop-zone { padding: 40px 20px; }
+        }
+    </style>
+</head>
+<body>
+
+<div class="header">
+    <h1>Organizador de Documentos</h1>
+    <p>AB Group — Ordem cronologica automatica</p>
+</div>
+
+<div class="container">
+
+    <!-- FORMULARIO -->
+    <div id="formulario">
+        <div class="card">
+            <div class="card-title"><span class="num">1</span> Dados do Caso</div>
+            <label for="nome_cliente">Nome do Cliente</label>
+            <input type="text" id="nome_cliente" placeholder="Ex: Maria da Silva" autocomplete="off">
+            <div style="height: 12px;"></div>
+            <label for="tipo_processo">Tipo de Processo</label>
+            <select id="tipo_processo">
+                <option value="">Selecione...</option>
+                {% for cod, nome in tipos.items() %}
+                <option value="{{ cod }}">{{ nome }}</option>
+                {% endfor %}
+            </select>
+        </div>
+
+        <div class="card">
+            <div class="card-title"><span class="num">2</span> Documentos</div>
+            <div class="drop-zone" id="dropZone">
+                <div class="drop-zone-icon">📄</div>
+                <div class="drop-zone-text">Toque para selecionar ou arraste aqui</div>
+                <div class="drop-zone-hint">PDF, JPG, PNG, DOCX — ate 100MB no total</div>
+            </div>
+            <input type="file" id="fileInput" multiple accept=".pdf,.jpg,.jpeg,.png,.docx" style="display:none">
+            <div class="file-list" id="fileList"></div>
+            <div class="file-count" id="fileCount"></div>
+        </div>
+
+        <div class="erro" id="erro"></div>
+
+        <button class="btn btn-primary" id="btnOrganizar" disabled>
+            Organizar Documentos
+        </button>
+    </div>
+
+    <!-- PROGRESSO -->
+    <div class="progress-overlay" id="progresso">
+        <div class="progress-box">
+            <div class="spinner"></div>
+            <div class="progress-text" id="progressText">Analisando documentos...</div>
+            <div class="progress-hint">A IA esta lendo cada documento</div>
+        </div>
+    </div>
+
+    <!-- RESULTADO -->
+    <div class="resultado" id="resultado">
+        <div class="card">
+            <div class="card-title" style="color: var(--verde);">Documentos Organizados</div>
+            <div class="stats">
+                <div class="stat">
+                    <div class="number" id="statTotal">0</div>
+                    <div class="label">Total</div>
+                </div>
+                <div class="stat">
+                    <div class="number" id="statComData">0</div>
+                    <div class="label">Com data</div>
+                </div>
+                <div class="stat">
+                    <div class="number" id="statSemData">0</div>
+                    <div class="label">Sem data</div>
+                </div>
+            </div>
+            <div id="listaResultado"></div>
+        </div>
+
+        <a class="btn btn-download" id="btnDownload" href="#">
+            Baixar ZIP Organizado
+        </a>
+        <button class="btn btn-secondary" id="btnNovo">
+            Organizar Outro Caso
+        </button>
+    </div>
+
+    <div class="footer">
+        Organizador Juridico — AB Group
+    </div>
+</div>
+
+<script>
+    const dropZone = document.getElementById('dropZone');
+    const fileInput = document.getElementById('fileInput');
+    const fileList = document.getElementById('fileList');
+    const fileCount = document.getElementById('fileCount');
+    const btnOrganizar = document.getElementById('btnOrganizar');
+    const erro = document.getElementById('erro');
+    const progresso = document.getElementById('progresso');
+    const progressText = document.getElementById('progressText');
+    const formulario = document.getElementById('formulario');
+    const resultado = document.getElementById('resultado');
+
+    let arquivos = [];
+
+    // Drop zone
+    dropZone.addEventListener('click', () => fileInput.click());
+
+    dropZone.addEventListener('dragover', (e) => {
+        e.preventDefault();
+        dropZone.classList.add('active');
+    });
+    dropZone.addEventListener('dragleave', () => {
+        dropZone.classList.remove('active');
+    });
+    dropZone.addEventListener('drop', (e) => {
+        e.preventDefault();
+        dropZone.classList.remove('active');
+        adicionarArquivos(e.dataTransfer.files);
+    });
+
+    fileInput.addEventListener('change', () => {
+        adicionarArquivos(fileInput.files);
+        fileInput.value = '';
+    });
+
+    function adicionarArquivos(novos) {
+        const extensoes = ['.pdf', '.jpg', '.jpeg', '.png', '.docx'];
+        for (const f of novos) {
+            const ext = '.' + f.name.split('.').pop().toLowerCase();
+            if (extensoes.includes(ext)) {
+                arquivos.push(f);
+            }
+        }
+        atualizarLista();
+    }
+
+    function removerArquivo(index) {
+        arquivos.splice(index, 1);
+        atualizarLista();
+    }
+
+    function formatarTamanho(bytes) {
+        if (bytes < 1024) return bytes + ' B';
+        if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(0) + ' KB';
+        return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+    }
+
+    function atualizarLista() {
+        fileList.innerHTML = '';
+        arquivos.forEach((f, i) => {
+            const div = document.createElement('div');
+            div.className = 'file-item';
+            div.innerHTML = `
+                <span class="name">${f.name}</span>
+                <span class="size">${formatarTamanho(f.size)}</span>
+                <span class="remove" onclick="removerArquivo(${i})">&times;</span>
+            `;
+            fileList.appendChild(div);
+        });
+
+        if (arquivos.length > 0) {
+            dropZone.classList.add('has-files');
+            fileCount.textContent = `${arquivos.length} documento(s) selecionado(s)`;
+        } else {
+            dropZone.classList.remove('has-files');
+            fileCount.textContent = '';
+        }
+        validarForm();
+    }
+
+    function validarForm() {
+        const nome = document.getElementById('nome_cliente').value.trim();
+        const tipo = document.getElementById('tipo_processo').value;
+        btnOrganizar.disabled = !(nome && tipo && arquivos.length > 0);
+    }
+
+    document.getElementById('nome_cliente').addEventListener('input', validarForm);
+    document.getElementById('tipo_processo').addEventListener('change', validarForm);
+
+    // Enviar
+    btnOrganizar.addEventListener('click', async () => {
+        erro.classList.remove('show');
+        const nome = document.getElementById('nome_cliente').value.trim();
+        const tipo = document.getElementById('tipo_processo').value;
+
+        if (!nome || !tipo || arquivos.length === 0) return;
+
+        // Mostra progresso
+        progressText.textContent = `Analisando ${arquivos.length} documento(s)...`;
+        progresso.classList.add('show');
+
+        const formData = new FormData();
+        formData.append('nome_cliente', nome);
+        formData.append('tipo_processo', tipo);
+        arquivos.forEach(f => formData.append('documentos', f));
+
+        try {
+            const resp = await fetch('/processar', {
+                method: 'POST',
+                body: formData,
+            });
+            const data = await resp.json();
+
+            progresso.classList.remove('show');
+
+            if (data.erro) {
+                erro.textContent = data.erro;
+                erro.classList.add('show');
+                return;
+            }
+
+            // Mostra resultado
+            formulario.style.display = 'none';
+            resultado.classList.add('show');
+
+            document.getElementById('statTotal').textContent = data.total;
+            document.getElementById('statComData').textContent = data.com_data;
+            document.getElementById('statSemData').textContent = data.sem_data;
+
+            const lista = document.getElementById('listaResultado');
+            lista.innerHTML = '';
+            data.documentos.forEach(doc => {
+                const div = document.createElement('div');
+                div.className = 'doc-resultado';
+                const ordemClass = doc.data ? '' : ' sem-data';
+                const dataTexto = doc.data
+                    ? new Date(doc.data + 'T12:00:00').toLocaleDateString('pt-BR')
+                    : 'Sem data';
+                div.innerHTML = `
+                    <div class="ordem${ordemClass}">${doc.ordem}</div>
+                    <div class="info">
+                        <div class="tipo">${doc.tipo}</div>
+                        <div class="data">${dataTexto}</div>
+                        <div class="original">${doc.original}</div>
+                    </div>
+                `;
+                lista.appendChild(div);
+            });
+
+            document.getElementById('btnDownload').href = `/download/${data.nome_pasta}`;
+
+        } catch (e) {
+            progresso.classList.remove('show');
+            erro.textContent = 'Erro de conexao. Tente novamente.';
+            erro.classList.add('show');
+        }
+    });
+
+    // Novo caso
+    document.getElementById('btnNovo').addEventListener('click', () => {
+        resultado.classList.remove('show');
+        formulario.style.display = 'block';
+        document.getElementById('nome_cliente').value = '';
+        document.getElementById('tipo_processo').value = '';
+        arquivos = [];
+        atualizarLista();
+        erro.classList.remove('show');
+    });
+</script>
+</body>
+</html>
