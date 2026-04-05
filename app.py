@@ -27,7 +27,8 @@ SHARED_ZIP_DIR.mkdir(exist_ok=True)
 
 MODELO_IA = "claude-haiku-4-5-20251001"
 EXTENSOES_ACEITAS = {".pdf", ".jpg", ".jpeg", ".png", ".docx"}
-MAX_TEXTO_POR_PAGINA = 1500
+MAX_TEXTO_POR_PAGINA = 800  # menor para economizar memoria
+MAX_PAGINAS_PDF = 30  # limite de paginas para evitar OOM
 
 TIPOS_PROCESSO = {
     "inss_admin": "INSS Administrativo",
@@ -89,14 +90,20 @@ def limpar_nome(texto):
 
 
 def extrair_textos_todas_paginas(caminho):
-    """Extrai texto de TODAS as paginas de um PDF."""
+    """Extrai texto de todas as paginas de um PDF (com limite para economizar memoria)."""
     import pdfplumber
     try:
         paginas = []
         with pdfplumber.open(caminho) as pdf:
-            for i, page in enumerate(pdf.pages):
-                texto = page.extract_text() or ""
-                paginas.append({"pagina": i + 1, "texto": texto[:MAX_TEXTO_POR_PAGINA]})
+            total = min(len(pdf.pages), MAX_PAGINAS_PDF)
+            for i in range(total):
+                try:
+                    texto = pdf.pages[i].extract_text() or ""
+                except Exception:
+                    texto = ""
+                # Pega so as primeiras linhas de cada pagina (suficiente para identificar tipo)
+                linhas = texto.split("\n")[:15]
+                paginas.append({"pagina": i + 1, "texto": "\n".join(linhas)[:MAX_TEXTO_POR_PAGINA]})
         return paginas
     except Exception:
         return []
@@ -163,19 +170,21 @@ def mapear_documentos_pdf(client, caminho, nome_arquivo):
     for p in paginas:
         texto_completo += f"\n--- PAGINA {p['pagina']} ---\n{p['texto']}\n"
 
-    # Se alguma pagina nao tem texto (escaneada), usa imagem
+    # Para paginas sem texto (escaneadas), envia imagem apenas da primeira pagina sem texto
     paginas_sem_texto = [p for p in paginas if not p["texto"].strip()]
     imagens_content = []
-    for p in paginas_sem_texto[:5]:  # max 5 imagens para nao estourar tokens
-        img_b64 = pagina_para_imagem_b64(caminho, p["pagina"])
-        if img_b64:
-            imagens_content.append({
-                "type": "text", "text": f"--- PAGINA {p['pagina']} (imagem) ---"
-            })
-            imagens_content.append({
-                "type": "image",
-                "source": {"type": "base64", "media_type": "image/jpeg", "data": img_b64},
-            })
+    if paginas_sem_texto and len(paginas_sem_texto) <= 3:
+        for p in paginas_sem_texto[:2]:  # max 2 imagens para nao estourar memoria
+            img_b64 = pagina_para_imagem_b64(caminho, p["pagina"])
+            if img_b64:
+                imagens_content.append({
+                    "type": "text", "text": f"--- PAGINA {p['pagina']} (imagem) ---"
+                })
+                imagens_content.append({
+                    "type": "image",
+                    "source": {"type": "base64", "media_type": "image/jpeg", "data": img_b64},
+                })
+                img_b64 = None  # libera memoria
 
     messages_content = []
     messages_content.append({
