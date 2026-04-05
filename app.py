@@ -2,6 +2,7 @@
 """
 Organizador de Documentos Juridicos - AB Group
 App web mobile-first para organizar documentos em ordem cronologica via IA.
+Separa automaticamente PDFs com multiplos documentos em arquivos individuais.
 """
 
 import os
@@ -26,7 +27,7 @@ SHARED_ZIP_DIR.mkdir(exist_ok=True)
 
 MODELO_IA = "claude-haiku-4-5-20251001"
 EXTENSOES_ACEITAS = {".pdf", ".jpg", ".jpeg", ".png", ".docx"}
-MAX_TEXTO_CHARS = 4000
+MAX_TEXTO_POR_PAGINA = 1500
 
 TIPOS_PROCESSO = {
     "inss_admin": "INSS Administrativo",
@@ -36,23 +37,47 @@ TIPOS_PROCESSO = {
     "civel": "Cível",
 }
 
-PROMPT_EXTRACAO = """Analise este documento juridico brasileiro.
+PROMPT_MAPEAMENTO = """Analise o texto de cada pagina deste PDF juridico brasileiro.
+Identifique TODOS os documentos separados que existem dentro deste arquivo.
+
+Documentos comuns: Procuracao, Declaracao (hipossuficiencia, residencia, etc.), Contrato de Honorarios, Termo de Responsabilidade, RG, CPF, CNH, CNIS, CTPS, Laudo Medico, Atestado, Comprovante de Residencia, Certidao, Decisao INSS, Contrato, Holerite, etc.
+
+IMPORTANTE:
+- Cada documento pode ter 1 ou mais paginas
+- Um documento de identidade (RG, CPF, CNH) geralmente e 1 pagina
+- Uma procuracao pode ter 1-3 paginas
+- Identifique onde cada documento COMECA e TERMINA
+
+Responda APENAS em JSON valido, sem markdown:
+{"documentos": [
+  {"tipo": "Procuracao", "pagina_inicio": 1, "pagina_fim": 2, "data": "YYYY-MM-DD"},
+  {"tipo": "RG", "pagina_inicio": 3, "pagina_fim": 3, "data": null},
+  ...
+]}
+
+Se o PDF tem apenas 1 documento, retorne 1 item na lista.
+Se nao encontrar data de emissao, use "data": null.
+"""
+
+PROMPT_EXTRACAO_SIMPLES = """Analise este documento juridico brasileiro.
 Extraia:
-1. Tipo do documento. Use EXATAMENTE uma destas categorias se o documento se encaixar:
-   - "Procuracao" (procuracao ad judicia, substabelecimento, etc.)
-   - "Declaracao" (declaracao de hipossuficiencia, declaracao de residencia, etc.)
-   - "Contrato de Honorarios" (contrato de honorarios advocaticios, contrato de prestacao de servicos juridicos, etc.)
-   - Se nao for nenhum dos tres acima, descreva o tipo em poucas palavras (ex: "RG", "CNIS", "Laudo Medico", "Decisao INSS", etc.)
-2. Data de emissao/expedicao do documento (a data em que o documento foi emitido, nao datas mencionadas no texto)
+1. Tipo do documento (Procuracao, Declaracao, Contrato de Honorarios, Termo de Responsabilidade, RG, CPF, CNH, CNIS, Laudo Medico, etc.)
+2. Data de emissao/expedicao do documento
 
 Responda APENAS em JSON valido, sem markdown:
 {"tipo": "...", "data": "YYYY-MM-DD"}
 
-Se nao encontrar data de emissao, use "data": null.
+Se nao encontrar data, use "data": null.
 """
 
 # Documentos com ordem fixa (sempre vem primeiro, nesta ordem)
-DOCS_ORDEM_FIXA = ["procuracao", "declaracao", "contrato_de_honorarios"]
+DOCS_ORDEM_FIXA = [
+    "procuracao",
+    "declaracao",
+    "contrato_de_honorarios",
+    "termo_de_responsabilidade",
+    "documento_pessoal",
+]
 
 
 def limpar_nome(texto):
@@ -63,24 +88,25 @@ def limpar_nome(texto):
     return texto
 
 
-def extrair_texto_pdf(caminho):
+def extrair_textos_todas_paginas(caminho):
+    """Extrai texto de TODAS as paginas de um PDF."""
     import pdfplumber
     try:
+        paginas = []
         with pdfplumber.open(caminho) as pdf:
-            if not pdf.pages:
-                return None
-            texto = pdf.pages[0].extract_text()
-            if texto and len(texto.strip()) > 20:
-                return texto[:MAX_TEXTO_CHARS]
-            return None
+            for i, page in enumerate(pdf.pages):
+                texto = page.extract_text() or ""
+                paginas.append({"pagina": i + 1, "texto": texto[:MAX_TEXTO_POR_PAGINA]})
+        return paginas
     except Exception:
-        return None
+        return []
 
 
-def pdf_para_imagem_b64(caminho):
+def pagina_para_imagem_b64(caminho, pagina_num):
+    """Converte uma pagina especifica do PDF em imagem base64."""
     from pdf2image import convert_from_path
     try:
-        imagens = convert_from_path(caminho, first_page=1, last_page=1, dpi=150)
+        imagens = convert_from_path(caminho, first_page=pagina_num, last_page=pagina_num, dpi=150)
         if imagens:
             buffer = io.BytesIO()
             imagens[0].save(buffer, format="JPEG", quality=80)
@@ -90,76 +116,255 @@ def pdf_para_imagem_b64(caminho):
         return None
 
 
-def extrair_texto_docx(caminho):
-    from docx import Document
+def separar_pdf(caminho_original, pagina_inicio, pagina_fim, caminho_destino):
+    """Extrai paginas de um PDF e salva em novo arquivo."""
+    import pdfplumber
+    from pypdf import PdfReader, PdfWriter
     try:
-        doc = Document(caminho)
-        texto = "\n".join(p.text for p in doc.paragraphs if p.text.strip())
-        return texto[:MAX_TEXTO_CHARS] if texto else None
+        reader = PdfReader(caminho_original)
+        writer = PdfWriter()
+        for i in range(pagina_inicio - 1, min(pagina_fim, len(reader.pages))):
+            writer.add_page(reader.pages[i])
+        with open(caminho_destino, "wb") as f:
+            writer.write(f)
+        return True
     except Exception:
-        return None
+        return False
 
 
-def analisar_com_ia(client, texto=None, imagem_b64=None, nome_arquivo=""):
+def mapear_documentos_pdf(client, caminho, nome_arquivo):
+    """Analisa PDF com multiplas paginas e identifica cada documento separado."""
+    paginas = extrair_textos_todas_paginas(caminho)
+
+    if not paginas:
+        # PDF escaneado - tenta via imagem da primeira pagina
+        img_b64 = pagina_para_imagem_b64(caminho, 1)
+        if img_b64:
+            resultado = analisar_imagem_simples(client, img_b64, nome_arquivo)
+            return [{"tipo": resultado.get("tipo", "desconhecido"), "pagina_inicio": 1,
+                     "pagina_fim": 1, "data": resultado.get("data")}]
+        return [{"tipo": "desconhecido", "pagina_inicio": 1, "pagina_fim": 1, "data": None}]
+
+    total_paginas = len(paginas)
+
+    if total_paginas == 1:
+        # PDF de 1 pagina - analise simples
+        texto = paginas[0]["texto"]
+        if texto.strip():
+            resultado = analisar_texto_simples(client, texto, nome_arquivo)
+        else:
+            img_b64 = pagina_para_imagem_b64(caminho, 1)
+            resultado = analisar_imagem_simples(client, img_b64, nome_arquivo) if img_b64 else {"tipo": "desconhecido", "data": None}
+        return [{"tipo": resultado.get("tipo", "desconhecido"), "pagina_inicio": 1,
+                 "pagina_fim": 1, "data": resultado.get("data")}]
+
+    # PDF com multiplas paginas - pede para IA mapear todos os documentos
+    texto_completo = ""
+    for p in paginas:
+        texto_completo += f"\n--- PAGINA {p['pagina']} ---\n{p['texto']}\n"
+
+    # Se alguma pagina nao tem texto (escaneada), usa imagem
+    paginas_sem_texto = [p for p in paginas if not p["texto"].strip()]
+    imagens_content = []
+    for p in paginas_sem_texto[:5]:  # max 5 imagens para nao estourar tokens
+        img_b64 = pagina_para_imagem_b64(caminho, p["pagina"])
+        if img_b64:
+            imagens_content.append({
+                "type": "text", "text": f"--- PAGINA {p['pagina']} (imagem) ---"
+            })
+            imagens_content.append({
+                "type": "image",
+                "source": {"type": "base64", "media_type": "image/jpeg", "data": img_b64},
+            })
+
     messages_content = []
+    messages_content.append({
+        "type": "text",
+        "text": f"Arquivo: {nome_arquivo} ({total_paginas} paginas)\n\n{texto_completo}"
+    })
+    messages_content.extend(imagens_content)
 
-    if texto:
-        messages_content.append(
-            {"type": "text", "text": f"Nome do arquivo: {nome_arquivo}\n\nConteudo:\n{texto}"}
+    try:
+        response = client.messages.create(
+            model=MODELO_IA,
+            max_tokens=1000,
+            messages=[
+                {"role": "user", "content": messages_content},
+                {"role": "user", "content": PROMPT_MAPEAMENTO},
+            ],
         )
-    elif imagem_b64:
-        ext = nome_arquivo.rsplit(".", 1)[-1].lower()
-        media_type = "image/jpeg" if ext in ("jpg", "jpeg") else "image/png"
-        messages_content.append({
-            "type": "image",
-            "source": {"type": "base64", "media_type": media_type, "data": imagem_b64},
-        })
-        messages_content.append({"type": "text", "text": f"Nome do arquivo: {nome_arquivo}"})
-    else:
-        return {"tipo": "desconhecido", "data": None}
+        resposta = response.content[0].text.strip()
+        if resposta.startswith("{"):
+            dados = json.loads(resposta)
+        elif "```" in resposta:
+            json_str = resposta.split("```")[1]
+            if json_str.startswith("json"):
+                json_str = json_str[4:]
+            dados = json.loads(json_str.strip())
+        else:
+            dados = json.loads(resposta)
 
+        docs = dados.get("documentos", [])
+        if docs:
+            return docs
+    except Exception:
+        pass
+
+    # Fallback: trata como documento unico
+    return [{"tipo": "desconhecido", "pagina_inicio": 1, "pagina_fim": total_paginas, "data": None}]
+
+
+def analisar_texto_simples(client, texto, nome_arquivo):
+    """Analise simples de texto para extrair tipo e data."""
     try:
         response = client.messages.create(
             model=MODELO_IA,
             max_tokens=200,
             messages=[
-                {"role": "user", "content": messages_content},
-                {"role": "user", "content": PROMPT_EXTRACAO},
+                {"role": "user", "content": f"Nome do arquivo: {nome_arquivo}\n\nConteudo:\n{texto}"},
+                {"role": "user", "content": PROMPT_EXTRACAO_SIMPLES},
             ],
         )
-        resposta_texto = response.content[0].text.strip()
-        if resposta_texto.startswith("{"):
-            return json.loads(resposta_texto)
-        if "```" in resposta_texto:
-            json_str = resposta_texto.split("```")[1]
+        resposta = response.content[0].text.strip()
+        if resposta.startswith("{"):
+            return json.loads(resposta)
+        if "```" in resposta:
+            json_str = resposta.split("```")[1]
             if json_str.startswith("json"):
                 json_str = json_str[4:]
             return json.loads(json_str.strip())
-        return json.loads(resposta_texto)
-    except (json.JSONDecodeError, Exception):
+        return json.loads(resposta)
+    except Exception:
         return {"tipo": "desconhecido", "data": None}
 
 
-def processar_arquivo(client, caminho, nome_original):
+def analisar_imagem_simples(client, imagem_b64, nome_arquivo):
+    """Analise simples de imagem para extrair tipo e data."""
+    try:
+        response = client.messages.create(
+            model=MODELO_IA,
+            max_tokens=200,
+            messages=[
+                {"role": "user", "content": [
+                    {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": imagem_b64}},
+                    {"type": "text", "text": f"Nome do arquivo: {nome_arquivo}"},
+                ]},
+                {"role": "user", "content": PROMPT_EXTRACAO_SIMPLES},
+            ],
+        )
+        resposta = response.content[0].text.strip()
+        if resposta.startswith("{"):
+            return json.loads(resposta)
+        return json.loads(resposta)
+    except Exception:
+        return {"tipo": "desconhecido", "data": None}
+
+
+def processar_arquivo_completo(client, caminho, nome_original, tmp_dir):
+    """Processa um arquivo, separando-o em documentos individuais se necessario.
+    Retorna lista de resultados (1 por documento encontrado)."""
     ext = Path(nome_original).suffix.lower()
+    resultados = []
 
     if ext == ".pdf":
-        texto = extrair_texto_pdf(caminho)
-        if texto:
-            return analisar_com_ia(client, texto=texto, nome_arquivo=nome_original)
-        img_b64 = pdf_para_imagem_b64(caminho)
-        if img_b64:
-            return analisar_com_ia(client, imagem_b64=img_b64, nome_arquivo=nome_original)
+        # Mapeia todos os documentos dentro do PDF
+        docs_encontrados = mapear_documentos_pdf(client, caminho, nome_original)
+
+        import pdfplumber
+        try:
+            with pdfplumber.open(caminho) as pdf:
+                total_paginas = len(pdf.pages)
+        except Exception:
+            total_paginas = 1
+
+        if len(docs_encontrados) == 1 and total_paginas <= 2:
+            # Documento unico, usa o arquivo original
+            doc = docs_encontrados[0]
+            resultados.append({
+                "tipo": doc.get("tipo", "desconhecido"),
+                "data": doc.get("data"),
+                "arquivo_tmp": caminho,
+                "nome_original": nome_original,
+                "extensao": ".pdf",
+            })
+        else:
+            # Multiplos documentos - separa em arquivos individuais
+            for i, doc in enumerate(docs_encontrados):
+                p_inicio = doc.get("pagina_inicio", 1)
+                p_fim = doc.get("pagina_fim", p_inicio)
+                tipo = doc.get("tipo", "desconhecido")
+                tipo_limpo = limpar_nome(tipo)[:30]
+
+                novo_caminho = os.path.join(tmp_dir, f"split_{i}_{tipo_limpo}.pdf")
+                if separar_pdf(caminho, p_inicio, p_fim, novo_caminho):
+                    resultados.append({
+                        "tipo": tipo,
+                        "data": doc.get("data"),
+                        "arquivo_tmp": novo_caminho,
+                        "nome_original": f"{nome_original} (pag {p_inicio}-{p_fim})",
+                        "extensao": ".pdf",
+                    })
+
     elif ext in (".jpg", ".jpeg", ".png"):
         with open(caminho, "rb") as f:
             img_b64 = base64.b64encode(f.read()).decode()
-        return analisar_com_ia(client, imagem_b64=img_b64, nome_arquivo=nome_original)
-    elif ext == ".docx":
-        texto = extrair_texto_docx(caminho)
-        if texto:
-            return analisar_com_ia(client, texto=texto, nome_arquivo=nome_original)
+        resultado = analisar_imagem_simples(client, img_b64, nome_original)
+        resultados.append({
+            "tipo": resultado.get("tipo", "desconhecido"),
+            "data": resultado.get("data"),
+            "arquivo_tmp": caminho,
+            "nome_original": nome_original,
+            "extensao": ext,
+        })
 
-    return {"tipo": "desconhecido", "data": None}
+    elif ext == ".docx":
+        from docx import Document
+        try:
+            doc = Document(caminho)
+            texto = "\n".join(p.text for p in doc.paragraphs if p.text.strip())
+            if texto:
+                resultado = analisar_texto_simples(client, texto[:4000], nome_original)
+            else:
+                resultado = {"tipo": "desconhecido", "data": None}
+        except Exception:
+            resultado = {"tipo": "desconhecido", "data": None}
+
+        resultados.append({
+            "tipo": resultado.get("tipo", "desconhecido"),
+            "data": resultado.get("data"),
+            "arquivo_tmp": caminho,
+            "nome_original": nome_original,
+            "extensao": ext,
+        })
+
+    if not resultados:
+        resultados.append({
+            "tipo": "desconhecido",
+            "data": None,
+            "arquivo_tmp": caminho,
+            "nome_original": nome_original,
+            "extensao": ext,
+        })
+
+    return resultados
+
+
+def classificar_doc(r):
+    """Retorna a categoria do doc para ordenacao fixa."""
+    tipo = limpar_nome(r.get("tipo", ""))
+    if "procuracao" in tipo or "substabelecimento" in tipo:
+        return "procuracao"
+    elif "declaracao" in tipo:
+        return "declaracao"
+    elif "contrato" in tipo and "honorario" in tipo:
+        return "contrato_de_honorarios"
+    elif "termo" in tipo and "responsabilidade" in tipo:
+        return "termo_de_responsabilidade"
+    elif tipo in ("rg", "cpf", "cnh", "identidade", "carteira_de_identidade",
+                   "documento_de_identidade", "carteira_nacional_de_habilitacao") or \
+         "identidade" in tipo or "cnh" in tipo:
+        return "documento_pessoal"
+    return None
 
 
 # === ROTAS ===
@@ -189,7 +394,6 @@ def processar():
     if not arquivos or all(f.filename == "" for f in arquivos):
         return jsonify({"erro": "Nenhum documento enviado"}), 400
 
-    # Filtra extensoes validas
     arquivos_validos = [
         f for f in arquivos
         if f.filename and Path(f.filename).suffix.lower() in EXTENSOES_ACEITAS
@@ -197,7 +401,6 @@ def processar():
     if not arquivos_validos:
         return jsonify({"erro": f"Nenhum arquivo valido. Aceitos: {', '.join(EXTENSOES_ACEITAS)}"}), 400
 
-    # Cria pasta temporaria
     tmp_dir = tempfile.mkdtemp()
 
     try:
@@ -205,30 +408,15 @@ def processar():
         resultados = []
 
         for arquivo in arquivos_validos:
-            # Salva arquivo temporario
             nome_original = arquivo.filename
             tmp_path = os.path.join(tmp_dir, nome_original)
             arquivo.save(tmp_path)
 
-            # Processa com IA
-            resultado = processar_arquivo(client, tmp_path, nome_original)
-            resultado["arquivo_tmp"] = tmp_path
-            resultado["nome_original"] = nome_original
-            resultado["extensao"] = Path(nome_original).suffix.lower()
-            resultados.append(resultado)
+            # Processa e separa documentos automaticamente
+            docs_separados = processar_arquivo_completo(client, tmp_path, nome_original, tmp_dir)
+            resultados.extend(docs_separados)
 
-        # Classifica documentos: ordem fixa vs demais (cronologicos)
-        def classificar_doc(r):
-            """Retorna a categoria do doc para ordenacao fixa."""
-            tipo = limpar_nome(r.get("tipo", ""))
-            if "procuracao" in tipo or "substabelecimento" in tipo:
-                return "procuracao"
-            elif "declaracao" in tipo:
-                return "declaracao"
-            elif "contrato" in tipo and "honorario" in tipo:
-                return "contrato_de_honorarios"
-            return None
-
+        # Classifica: ordem fixa vs demais (cronologicos)
         docs_fixos = {cat: [] for cat in DOCS_ORDEM_FIXA}
         docs_cronologicos = []
 
@@ -239,7 +427,6 @@ def processar():
             else:
                 docs_cronologicos.append(r)
 
-        # Ordena cronologicos por data (sem data vai pro final)
         docs_cronologicos.sort(key=lambda r: r.get("data") or "9999-99-99")
 
         # Monta ZIP
@@ -250,7 +437,7 @@ def processar():
             f"Relatorio de Organizacao - {nome_cliente}",
             f"Tipo: {TIPOS_PROCESSO[tipo_processo]}",
             f"Data: {datetime.now().strftime('%Y-%m-%d %H:%M')}",
-            f"Total: {len(resultados)}",
+            f"Total de documentos separados: {len(resultados)}",
             "-" * 50,
             "",
         ]
@@ -258,17 +445,23 @@ def processar():
         lista_docs = []
         ordem = 1
 
+        nomes_fixos = {
+            "procuracao": "Procuracao",
+            "declaracao": "Declaracao",
+            "contrato_de_honorarios": "Contrato_de_Honorarios",
+            "termo_de_responsabilidade": "Termo_de_Responsabilidade",
+            "documento_pessoal": None,  # usa o tipo real (RG, CPF, CNH)
+        }
+
         with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
-            # 1) Documentos com ordem fixa: Procuracao, Declaracao, Contrato
-            nomes_fixos = {
-                "procuracao": "Procuracao",
-                "declaracao": "Declaracao",
-                "contrato_de_honorarios": "Contrato_de_Honorarios",
-            }
+            # 1) Documentos com ordem fixa
             for cat in DOCS_ORDEM_FIXA:
                 for r in docs_fixos[cat]:
-                    tipo_label = nomes_fixos[cat]
-                    novo_nome = f"{ordem:02d}_{nome_limpo}_{tipo_label}{r['extensao']}"
+                    label = nomes_fixos[cat]
+                    if label is None:
+                        label = limpar_nome(r.get("tipo", "documento"))[:30]
+                        label = label.upper()
+                    novo_nome = f"{ordem:02d}_{nome_limpo}_{label}{r['extensao']}"
                     zf.write(r["arquivo_tmp"], f"{nome_pasta}/{novo_nome}")
                     relatorio_linhas.append(
                         f"{novo_nome} | Original: {r['nome_original']} | Tipo: {r.get('tipo', '?')} | Data: {r.get('data', 'N/A')}"
@@ -306,12 +499,10 @@ def processar():
 
         zip_buffer.seek(0)
 
-        # Salva ZIP no diretorio compartilhado (acessivel por todos os workers)
         shared_zip = SHARED_ZIP_DIR / f"{nome_pasta}.zip"
         with open(shared_zip, "wb") as f:
             f.write(zip_buffer.getvalue())
 
-        # Limpa arquivos temporarios de processamento
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
         return jsonify({
@@ -330,7 +521,6 @@ def processar():
 
 @app.route("/download/<nome_pasta>")
 def download(nome_pasta):
-    # Busca no diretorio compartilhado (funciona com multiplos workers)
     zip_path = SHARED_ZIP_DIR / f"{nome_pasta}.zip"
     if not zip_path.exists():
         return "Arquivo nao encontrado. Processe novamente.", 404

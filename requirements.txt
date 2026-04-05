@@ -1,6 +1,7 @@
 flask
 anthropic
 pdfplumber
+pypdf
 Pillow
 python-docx
 pdf2image
