@@ -29,6 +29,7 @@ MODELO_IA = "claude-haiku-4-5-20251001"
 EXTENSOES_ACEITAS = {".pdf", ".jpg", ".jpeg", ".png", ".docx"}
 MAX_TEXTO_POR_PAGINA = 800  # menor para economizar memoria
 MAX_PAGINAS_PDF = 30  # limite de paginas para evitar OOM
+MAX_FILE_SIZE_BYTES = 25 * 1024 * 1024  # 25MB limite por arquivo
 
 TIPOS_PROCESSO = {
     "inss_admin": "INSS Administrativo",
@@ -107,6 +108,55 @@ def extrair_textos_todas_paginas(caminho):
         return paginas
     except Exception:
         return []
+
+
+def dividir_pdf_por_tamanho(caminho, tmp_dir, max_bytes=MAX_FILE_SIZE_BYTES):
+    """Divide um PDF grande em partes menores de no maximo max_bytes cada."""
+    from pypdf import PdfReader, PdfWriter
+
+    tamanho = os.path.getsize(caminho)
+    if tamanho <= max_bytes:
+        return [caminho]  # nao precisa dividir
+
+    try:
+        reader = PdfReader(caminho)
+        total_paginas = len(reader.pages)
+        if total_paginas <= 1:
+            return [caminho]  # nao da pra dividir mais
+
+        # Estima paginas por parte baseado no tamanho
+        bytes_por_pagina = tamanho / total_paginas
+        paginas_por_parte = max(1, int(max_bytes / bytes_por_pagina))
+
+        partes = []
+        inicio = 0
+        parte_num = 1
+
+        while inicio < total_paginas:
+            fim = min(inicio + paginas_por_parte, total_paginas)
+            writer = PdfWriter()
+            for i in range(inicio, fim):
+                writer.add_page(reader.pages[i])
+
+            nome_base = Path(caminho).stem
+            parte_path = os.path.join(tmp_dir, f"{nome_base}_parte{parte_num}.pdf")
+            with open(parte_path, "wb") as f:
+                writer.write(f)
+
+            # Verifica se a parte ainda e grande demais (pode acontecer com paginas pesadas)
+            if os.path.getsize(parte_path) > max_bytes and (fim - inicio) > 1:
+                # Tenta com menos paginas
+                os.remove(parte_path)
+                paginas_por_parte = max(1, paginas_por_parte // 2)
+                continue
+
+            partes.append(parte_path)
+            inicio = fim
+            parte_num += 1
+
+        return partes if partes else [caminho]
+    except Exception:
+        return [caminho]
 
 
 def pagina_para_imagem_b64(caminho, pagina_num):
@@ -421,9 +471,18 @@ def processar():
             tmp_path = os.path.join(tmp_dir, nome_original)
             arquivo.save(tmp_path)
 
-            # Processa e separa documentos automaticamente
-            docs_separados = processar_arquivo_completo(client, tmp_path, nome_original, tmp_dir)
-            resultados.extend(docs_separados)
+            # Se PDF maior que 25MB, divide em partes menores
+            ext = Path(nome_original).suffix.lower()
+            if ext == ".pdf" and os.path.getsize(tmp_path) > MAX_FILE_SIZE_BYTES:
+                partes = dividir_pdf_por_tamanho(tmp_path, tmp_dir)
+                for i, parte_path in enumerate(partes):
+                    parte_nome = f"{nome_original} (parte {i+1}/{len(partes)})"
+                    docs_separados = processar_arquivo_completo(client, parte_path, parte_nome, tmp_dir)
+                    resultados.extend(docs_separados)
+            else:
+                # Processa e separa documentos automaticamente
+                docs_separados = processar_arquivo_completo(client, tmp_path, nome_original, tmp_dir)
+                resultados.extend(docs_separados)
 
         # Classifica: ordem fixa vs demais (cronologicos)
         docs_fixos = {cat: [] for cat in DOCS_ORDEM_FIXA}
