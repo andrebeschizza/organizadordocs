@@ -20,6 +20,10 @@ from flask import Flask, render_template, request, jsonify, send_file
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 100 * 1024 * 1024  # 100MB max total
 
+# Diretorio compartilhado entre workers para ZIPs temporarios
+SHARED_ZIP_DIR = Path(tempfile.gettempdir()) / "organizador-zips"
+SHARED_ZIP_DIR.mkdir(exist_ok=True)
+
 MODELO_IA = "claude-haiku-4-5-20251001"
 EXTENSOES_ACEITAS = {".pdf", ".jpg", ".jpeg", ".png", ".docx"}
 MAX_TEXTO_CHARS = 4000
@@ -264,14 +268,13 @@ def processar():
 
         zip_buffer.seek(0)
 
-        # Salva ZIP temporario para download
-        zip_path = os.path.join(tmp_dir, f"{nome_pasta}.zip")
-        with open(zip_path, "wb") as f:
+        # Salva ZIP no diretorio compartilhado (acessivel por todos os workers)
+        shared_zip = SHARED_ZIP_DIR / f"{nome_pasta}.zip"
+        with open(shared_zip, "wb") as f:
             f.write(zip_buffer.getvalue())
 
-        # Guarda caminho no app para download
-        app.config[f"zip_{nome_pasta}"] = zip_path
-        app.config[f"tmp_{nome_pasta}"] = tmp_dir
+        # Limpa arquivos temporarios de processamento
+        shutil.rmtree(tmp_dir, ignore_errors=True)
 
         return jsonify({
             "sucesso": True,
@@ -289,17 +292,10 @@ def processar():
 
 @app.route("/download/<nome_pasta>")
 def download(nome_pasta):
-    zip_path = app.config.get(f"zip_{nome_pasta}")
-    if not zip_path or not os.path.exists(zip_path):
+    # Busca no diretorio compartilhado (funciona com multiplos workers)
+    zip_path = SHARED_ZIP_DIR / f"{nome_pasta}.zip"
+    if not zip_path.exists():
         return "Arquivo nao encontrado. Processe novamente.", 404
-
-    def limpar_depois(response):
-        tmp_dir = app.config.get(f"tmp_{nome_pasta}")
-        if tmp_dir:
-            shutil.rmtree(tmp_dir, ignore_errors=True)
-            app.config.pop(f"zip_{nome_pasta}", None)
-            app.config.pop(f"tmp_{nome_pasta}", None)
-        return response
 
     return send_file(
         zip_path,
