@@ -319,8 +319,8 @@ def processar():
             "nome_pasta": nome_pasta,
             "documentos": lista_docs,
             "total": len(resultados),
-            "com_data": len(com_data),
-            "sem_data": len(sem_data),
+            "com_data": sum(1 for r in resultados if r.get("data")),
+            "sem_data": sum(1 for r in resultados if not r.get("data")),
         })
 
     except Exception as e:
