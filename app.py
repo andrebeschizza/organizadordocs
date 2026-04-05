@@ -38,14 +38,21 @@ TIPOS_PROCESSO = {
 
 PROMPT_EXTRACAO = """Analise este documento juridico brasileiro.
 Extraia:
-1. Tipo do documento (ex: procuracao, RG, CPF, CNIS, laudo medico, contrato, holerite, etc.)
+1. Tipo do documento. Use EXATAMENTE uma destas categorias se o documento se encaixar:
+   - "Procuracao" (procuracao ad judicia, substabelecimento, etc.)
+   - "Declaracao" (declaracao de hipossuficiencia, declaracao de residencia, etc.)
+   - "Contrato de Honorarios" (contrato de honorarios advocaticios, contrato de prestacao de servicos juridicos, etc.)
+   - Se nao for nenhum dos tres acima, descreva o tipo em poucas palavras (ex: "RG", "CNIS", "Laudo Medico", "Decisao INSS", etc.)
 2. Data de emissao/expedicao do documento (a data em que o documento foi emitido, nao datas mencionadas no texto)
 
 Responda APENAS em JSON valido, sem markdown:
-{"tipo": "descricao curta do tipo", "data": "YYYY-MM-DD"}
+{"tipo": "...", "data": "YYYY-MM-DD"}
 
-Se nao encontrar data de emissao, use: {"tipo": "descricao", "data": null}
+Se nao encontrar data de emissao, use "data": null.
 """
+
+# Documentos com ordem fixa (sempre vem primeiro, nesta ordem)
+DOCS_ORDEM_FIXA = ["procuracao", "declaracao", "contrato_de_honorarios"]
 
 
 def limpar_nome(texto):
@@ -210,57 +217,88 @@ def processar():
             resultado["extensao"] = Path(nome_original).suffix.lower()
             resultados.append(resultado)
 
-        # Separa e ordena
-        com_data = [r for r in resultados if r.get("data")]
-        sem_data = [r for r in resultados if not r.get("data")]
-        com_data.sort(key=lambda r: r["data"])
+        # Classifica documentos: ordem fixa vs demais (cronologicos)
+        def classificar_doc(r):
+            """Retorna a categoria do doc para ordenacao fixa."""
+            tipo = limpar_nome(r.get("tipo", ""))
+            if "procuracao" in tipo or "substabelecimento" in tipo:
+                return "procuracao"
+            elif "declaracao" in tipo:
+                return "declaracao"
+            elif "contrato" in tipo and "honorario" in tipo:
+                return "contrato_de_honorarios"
+            return None
+
+        docs_fixos = {cat: [] for cat in DOCS_ORDEM_FIXA}
+        docs_cronologicos = []
+
+        for r in resultados:
+            cat = classificar_doc(r)
+            if cat:
+                docs_fixos[cat].append(r)
+            else:
+                docs_cronologicos.append(r)
+
+        # Ordena cronologicos por data (sem data vai pro final)
+        docs_cronologicos.sort(key=lambda r: r.get("data") or "9999-99-99")
 
         # Monta ZIP
         zip_buffer = io.BytesIO()
-        nome_pasta = f"{limpar_nome(nome_cliente)}_{tipo_processo}"
+        nome_limpo = limpar_nome(nome_cliente)
+        nome_pasta = f"{nome_limpo}_{tipo_processo}"
         relatorio_linhas = [
             f"Relatorio de Organizacao - {nome_cliente}",
             f"Tipo: {TIPOS_PROCESSO[tipo_processo]}",
             f"Data: {datetime.now().strftime('%Y-%m-%d %H:%M')}",
-            f"Total: {len(resultados)} | Com data: {len(com_data)} | Sem data: {len(sem_data)}",
+            f"Total: {len(resultados)}",
             "-" * 50,
             "",
         ]
 
         lista_docs = []
+        ordem = 1
 
         with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
-            ordem = 1
-            for r in com_data:
+            # 1) Documentos com ordem fixa: Procuracao, Declaracao, Contrato
+            nomes_fixos = {
+                "procuracao": "Procuracao",
+                "declaracao": "Declaracao",
+                "contrato_de_honorarios": "Contrato_de_Honorarios",
+            }
+            for cat in DOCS_ORDEM_FIXA:
+                for r in docs_fixos[cat]:
+                    tipo_label = nomes_fixos[cat]
+                    novo_nome = f"{ordem:02d}_{nome_limpo}_{tipo_label}{r['extensao']}"
+                    zf.write(r["arquivo_tmp"], f"{nome_pasta}/{novo_nome}")
+                    relatorio_linhas.append(
+                        f"{novo_nome} | Original: {r['nome_original']} | Tipo: {r.get('tipo', '?')} | Data: {r.get('data', 'N/A')}"
+                    )
+                    lista_docs.append({
+                        "ordem": ordem,
+                        "nome": novo_nome,
+                        "original": r["nome_original"],
+                        "tipo": r.get("tipo", "?"),
+                        "data": r.get("data"),
+                    })
+                    ordem += 1
+
+            # 2) Demais documentos em ordem cronologica
+            for r in docs_cronologicos:
                 tipo_limpo = limpar_nome(r.get("tipo", "documento"))[:30]
-                novo_nome = f"{ordem:02d}_{r['data']}_{tipo_limpo}{r['extensao']}"
+                data_str = r.get("data") or "sem_data"
+                novo_nome = f"{ordem:02d}_{nome_limpo}_{data_str}_{tipo_limpo}{r['extensao']}"
                 zf.write(r["arquivo_tmp"], f"{nome_pasta}/{novo_nome}")
                 relatorio_linhas.append(
-                    f"{novo_nome} | Original: {r['nome_original']} | Tipo: {r.get('tipo', '?')} | Data: {r['data']}"
+                    f"{novo_nome} | Original: {r['nome_original']} | Tipo: {r.get('tipo', '?')} | Data: {r.get('data', 'NAO ENCONTRADA')}"
                 )
                 lista_docs.append({
                     "ordem": ordem,
                     "nome": novo_nome,
                     "original": r["nome_original"],
                     "tipo": r.get("tipo", "?"),
-                    "data": r["data"],
+                    "data": r.get("data"),
                 })
                 ordem += 1
-
-            for r in sem_data:
-                tipo_limpo = limpar_nome(r.get("tipo", "documento"))[:30]
-                novo_nome = f"99_sem_data_{tipo_limpo}{r['extensao']}"
-                zf.write(r["arquivo_tmp"], f"{nome_pasta}/{novo_nome}")
-                relatorio_linhas.append(
-                    f"{novo_nome} | Original: {r['nome_original']} | Tipo: {r.get('tipo', '?')} | Data: NAO ENCONTRADA"
-                )
-                lista_docs.append({
-                    "ordem": 99,
-                    "nome": novo_nome,
-                    "original": r["nome_original"],
-                    "tipo": r.get("tipo", "?"),
-                    "data": None,
-                })
 
             relatorio_linhas.append("")
             relatorio_linhas.append("Gerado por: Organizador Juridico AB Group")
