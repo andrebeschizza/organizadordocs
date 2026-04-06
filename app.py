@@ -29,7 +29,16 @@ MODELO_IA = "claude-haiku-4-5-20251001"
 EXTENSOES_ACEITAS = {".pdf", ".jpg", ".jpeg", ".png", ".docx"}
 MAX_TEXTO_POR_PAGINA = 800  # menor para economizar memoria
 MAX_PAGINAS_PDF = 30  # limite de paginas para evitar OOM
-MAX_FILE_SIZE_BYTES = 25 * 1024 * 1024  # 25MB limite por arquivo
+
+# Limite de tamanho por tipo de processo (em bytes)
+LIMITES_TAMANHO = {
+    "inss_admin": 5 * 1024 * 1024,   # 5MB
+    "judicial": 10 * 1024 * 1024,    # 10MB
+    "consumidor": 10 * 1024 * 1024,  # 10MB
+    "trabalhista": 10 * 1024 * 1024, # 10MB
+    "civel": 10 * 1024 * 1024,       # 10MB
+}
+MAX_FILE_SIZE_BYTES = 25 * 1024 * 1024  # fallback geral
 
 TIPOS_PROCESSO = {
     "inss_admin": "INSS Administrativo",
@@ -42,28 +51,49 @@ TIPOS_PROCESSO = {
 PROMPT_MAPEAMENTO = """Analise o texto de cada pagina deste PDF juridico brasileiro.
 Identifique TODOS os documentos separados que existem dentro deste arquivo.
 
-Documentos comuns: Procuracao, Declaracao (hipossuficiencia, residencia, etc.), Contrato de Honorarios, Termo de Responsabilidade, RG, CPF, CNH, CNIS, CTPS, Laudo Medico, Atestado, Comprovante de Residencia, Certidao, Decisao INSS, Contrato, Holerite, etc.
+Tipos comuns de documentos:
+- Procuracao, Substabelecimento
+- Declaracao de Hipossuficiencia/Pobreza, Declaracao
+- Contrato de Honorarios
+- Termo de Responsabilidade, Termo de Representacao
+- Protocolo de Assinatura (gerado por DocuSign, Clicksign, ZapSign, D4Sign, etc. - geralmente vem APOS um documento assinado)
+- RG, CPF, CNH, Documento de Identidade
+- CNIS, CTPS, Carteira de Trabalho
+- Carta Indeferimento INSS, Decisao INSS
+- Atestado Medico, Relatorio Medico, Receita Medica
+- Exame Medico, Laudo Medico, Laudo MeuINSS
+- Certidao de Casamento, Certidao de Nascimento, Certidao de Obito
+- Termo de Homologacao Atividade Rural, Documentos Rurais
+- Folha V7, Declaracao de Tempo de Servico, Ficha do Funcionario
+- Certidao de Tempo de Servico, Ficha Financeira
+- PPP - Perfil Profissiografico Previdenciario
+- LTCAT - Laudo Tecnico das Condicoes de Trabalho
+- GPS - Guia Pagamento Previdencia Social
+- Comprovante de Residencia, Comprovante de Gasto
+- Foto de Residencia
+- Avaliacao Social, Pericia Medica
+- Contagem de Tempo, Calculo Renda Mensal
+- Copia Processo Administrativo
+- Certidao Negativa Justica Estadual
 
 IMPORTANTE:
 - Cada documento pode ter 1 ou mais paginas
-- Um documento de identidade (RG, CPF, CNH) geralmente e 1 pagina
-- Uma procuracao pode ter 1-3 paginas
+- "Protocolo de Assinatura" e um documento separado mas geralmente segue o documento assinado (procuracao, declaracao, etc.)
 - Identifique onde cada documento COMECA e TERMINA
 
 Responda APENAS em JSON valido, sem markdown:
 {"documentos": [
   {"tipo": "Procuracao", "pagina_inicio": 1, "pagina_fim": 2, "data": "YYYY-MM-DD"},
-  {"tipo": "RG", "pagina_inicio": 3, "pagina_fim": 3, "data": null},
-  ...
+  {"tipo": "Protocolo de Assinatura", "pagina_inicio": 3, "pagina_fim": 3, "data": null},
+  {"tipo": "RG", "pagina_inicio": 4, "pagina_fim": 4, "data": null}
 ]}
 
-Se o PDF tem apenas 1 documento, retorne 1 item na lista.
-Se nao encontrar data de emissao, use "data": null.
+Se nao encontrar data, use "data": null.
 """
 
 PROMPT_EXTRACAO_SIMPLES = """Analise este documento juridico brasileiro.
 Extraia:
-1. Tipo do documento (Procuracao, Declaracao, Contrato de Honorarios, Termo de Responsabilidade, RG, CPF, CNH, CNIS, Laudo Medico, etc.)
+1. Tipo do documento (use os tipos: Procuracao, Substabelecimento, Declaracao de Hipossuficiencia, Contrato de Honorarios, Termo de Responsabilidade, Protocolo de Assinatura, RG, CPF, CNH, CNIS, CTPS, Carta Indeferimento INSS, Atestado Medico, Relatorio Medico, Receita Medica, Exame Medico, Laudo Medico, Laudo MeuINSS, Certidao de Casamento, Certidao de Nascimento, Certidao de Obito, Documentos Rurais, Folha V7, Declaracao Tempo Servico, Ficha Funcionario, Certidao Tempo Servico, Ficha Financeira, PPP, LTCAT, GPS, Comprovante Residencia, Comprovante Gasto, Foto Residencia, etc.)
 2. Data de emissao/expedicao do documento
 
 Responda APENAS em JSON valido, sem markdown:
@@ -72,14 +102,71 @@ Responda APENAS em JSON valido, sem markdown:
 Se nao encontrar data, use "data": null.
 """
 
-# Documentos com ordem fixa (sempre vem primeiro, nesta ordem)
-DOCS_ORDEM_FIXA = [
+# Sequencia para INSS Administrativo (simples)
+SEQUENCIA_INSS_ADMIN = [
+    ("procuracao", "Procuracao"),
+    ("substabelecimento", "Substabelecimento"),
+    ("declaracao", "Declaracao"),
+    ("contrato_de_honorarios", "Contrato_de_Honorarios"),
+    ("termo_de_responsabilidade", "Termo_de_Responsabilidade"),
+    ("documento_pessoal", None),  # usa tipo real
+]
+
+# Sequencia detalhada para Processos Judiciais
+SEQUENCIA_JUDICIAL = [
+    ("procuracao", "Procuracao"),
+    ("substabelecimento", "Substabelecimento"),
+    ("declaracao_hipossuficiencia", "Declaracao_de_Hipossuficiencia"),
+    ("documento_pessoal", None),
+    ("carta_indeferimento", "Carta_Indeferimento_INSS"),
+    ("cnis", "CNIS"),
+    ("ctps", "CTPS"),
+    ("atestados_relatorios_receitas", "Atestados_Relatorios_Receitas_Medicas"),
+    ("exames_medicos", "Exames_Medicos"),
+    ("laudo_meuinss", "Laudo_MeuINSS"),
+    ("documentos_rurais", "Documentos_Rurais"),
+    ("folha_v7", "Folha_V7"),
+    ("certidoes", "Certidoes"),
+    ("termo_homologacao_rural", "Termo_Homologacao_Atividade_Rural"),
+    ("declaracao_tempo_servico", "Declaracao_Tempo_Servico_Ficha_Funcionario"),
+    ("certidao_tempo_servico", "Certidao_Tempo_Servico"),
+    ("ficha_financeira", "Ficha_Financeira"),
+    ("ppp", "PPP"),
+    ("ltcat", "LTCAT"),
+    ("gps", "GPS"),
+    ("comprovante_gasto", "Comprovantes_Gastos"),
+    ("foto_residencia", "Fotos_Residencia"),
+    ("avaliacao_social_pericia", "Avaliacao_Social_Pericia_Medica"),
+    ("contagem_tempo", "Contagem_Tempo"),
+    ("calculo_regras_transicao", "Calculo_Regras_Transicao"),
+    ("calculo_rmi", "Calculo_RMI"),
+    ("copia_processo_administrativo", "Copia_Processo_Administrativo"),
+    ("certidao_negativa_estadual", "Certidao_Negativa_Justica_Estadual"),
+    ("comprovante_residencia", "Comprovante_Residencia"),
+]
+
+# Categorias que devem ser MERGED em um unico PDF (em ordem cronologica)
+CATEGORIAS_MERGE = {
+    "atestados_relatorios_receitas",
+    "exames_medicos",
+    "documentos_rurais",
+    "comprovante_gasto",
+    "ctps",
+    "certidoes",
+    "declaracao_tempo_servico",
+    "ficha_financeira",
+    "gps",
+}
+
+# Categorias que devem receber o "protocolo de assinatura" anexado
+CATEGORIAS_ASSINADAS = {
     "procuracao",
+    "substabelecimento",
     "declaracao",
+    "declaracao_hipossuficiencia",
     "contrato_de_honorarios",
     "termo_de_responsabilidade",
-    "documento_pessoal",
-]
+}
 
 
 def limpar_nome(texto):
@@ -408,22 +495,136 @@ def processar_arquivo_completo(client, caminho, nome_original, tmp_dir):
     return resultados
 
 
-def classificar_doc(r):
-    """Retorna a categoria do doc para ordenacao fixa."""
+def eh_protocolo_assinatura(r):
+    """Verifica se um documento e protocolo de assinatura."""
     tipo = limpar_nome(r.get("tipo", ""))
-    if "procuracao" in tipo or "substabelecimento" in tipo:
+    return "protocolo" in tipo and "assinatura" in tipo
+
+
+def classificar_doc(r, tipo_processo):
+    """Retorna a categoria do doc para ordenacao baseada no tipo de processo."""
+    tipo = limpar_nome(r.get("tipo", ""))
+
+    # Substabelecimento (separado de procuracao)
+    if "substabelecimento" in tipo:
+        return "substabelecimento"
+    # Procuracao
+    if "procuracao" in tipo:
         return "procuracao"
-    elif "declaracao" in tipo:
+    # Declaracao de hipossuficiencia (separada das demais)
+    if "declaracao" in tipo and ("hipossuficiencia" in tipo or "pobreza" in tipo):
+        return "declaracao_hipossuficiencia"
+    # Outras declaracoes
+    if "declaracao" in tipo and "tempo" in tipo and "servico" in tipo:
+        return "declaracao_tempo_servico"
+    if "declaracao" in tipo:
         return "declaracao"
-    elif "contrato" in tipo and "honorario" in tipo:
+    # Contrato de honorarios
+    if "contrato" in tipo and "honorario" in tipo:
         return "contrato_de_honorarios"
-    elif "termo" in tipo and "responsabilidade" in tipo:
+    # Termo de responsabilidade
+    if "termo" in tipo and "responsabilidade" in tipo:
         return "termo_de_responsabilidade"
-    elif tipo in ("rg", "cpf", "cnh", "identidade", "carteira_de_identidade",
-                   "documento_de_identidade", "carteira_nacional_de_habilitacao") or \
-         "identidade" in tipo or "cnh" in tipo:
+    # Carta de indeferimento INSS
+    if "carta" in tipo and "indeferimento" in tipo:
+        return "carta_indeferimento"
+    if "decisao" in tipo and "inss" in tipo:
+        return "carta_indeferimento"
+    # CNIS
+    if "cnis" in tipo:
+        return "cnis"
+    # CTPS
+    if "ctps" in tipo or ("carteira" in tipo and "trabalho" in tipo):
+        return "ctps"
+    # Documentos medicos
+    if "laudo" in tipo and ("meuinss" in tipo or "meu_inss" in tipo):
+        return "laudo_meuinss"
+    if "exame" in tipo and "medico" in tipo:
+        return "exames_medicos"
+    if "exame" in tipo:
+        return "exames_medicos"
+    if any(k in tipo for k in ["atestado", "relatorio_medico", "receita_medica"]):
+        return "atestados_relatorios_receitas"
+    if "laudo" in tipo:
+        return "atestados_relatorios_receitas"
+    # Documentos rurais
+    if "rural" in tipo and "homologacao" in tipo:
+        return "termo_homologacao_rural"
+    if "rural" in tipo or "atividade_rural" in tipo:
+        return "documentos_rurais"
+    # Folha V7
+    if "folha_v7" in tipo or tipo == "folha_v7" or "v7" in tipo:
+        return "folha_v7"
+    # Certidoes
+    if "certidao" in tipo and "tempo" in tipo and "servico" in tipo:
+        return "certidao_tempo_servico"
+    if "certidao" in tipo and "negativa" in tipo:
+        return "certidao_negativa_estadual"
+    if "certidao" in tipo and any(k in tipo for k in ["casamento", "nascimento", "obito"]):
+        return "certidoes"
+    if "certidao" in tipo:
+        return "certidoes"
+    # Ficha financeira / funcionario
+    if "ficha" in tipo and "financeira" in tipo:
+        return "ficha_financeira"
+    if "ficha" in tipo and "funcionario" in tipo:
+        return "declaracao_tempo_servico"
+    # PPP / LTCAT
+    if "ppp" in tipo or "perfil_profissiografico" in tipo:
+        return "ppp"
+    if "ltcat" in tipo or ("laudo" in tipo and "tecnico" in tipo):
+        return "ltcat"
+    # GPS
+    if "gps" in tipo or ("guia" in tipo and "previdencia" in tipo):
+        return "gps"
+    # Comprovantes
+    if "comprovante" in tipo and ("gasto" in tipo or "despesa" in tipo or "pagamento" in tipo):
+        return "comprovante_gasto"
+    if "comprovante" in tipo and "residencia" in tipo:
+        return "comprovante_residencia"
+    # Fotos
+    if "foto" in tipo and "residencia" in tipo:
+        return "foto_residencia"
+    # Avaliacao social / pericia
+    if ("avaliacao" in tipo and "social" in tipo) or "pericia_medica" in tipo or "pericia" in tipo:
+        return "avaliacao_social_pericia"
+    # Calculos
+    if "contagem" in tipo and "tempo" in tipo:
+        return "contagem_tempo"
+    if "calculo" in tipo and ("transicao" in tipo or "regra" in tipo):
+        return "calculo_regras_transicao"
+    if "calculo" in tipo and ("rmi" in tipo or "renda_mensal" in tipo):
+        return "calculo_rmi"
+    # Copia processo
+    if "copia" in tipo and "processo" in tipo:
+        return "copia_processo_administrativo"
+    if "processo_administrativo" in tipo:
+        return "copia_processo_administrativo"
+    # Documentos pessoais
+    if tipo in ("rg", "cpf", "cnh") or \
+       any(k in tipo for k in ["identidade", "cnh", "carteira_nacional"]):
         return "documento_pessoal"
+
     return None
+
+
+def merge_pdfs(caminhos, destino):
+    """Junta varios PDFs em um unico arquivo."""
+    from pypdf import PdfReader, PdfWriter
+    try:
+        writer = PdfWriter()
+        for caminho in caminhos:
+            try:
+                reader = PdfReader(caminho)
+                for page in reader.pages:
+                    writer.add_page(page)
+            except Exception:
+                continue
+        with open(destino, "wb") as f:
+            writer.write(f)
+        return True
+    except Exception:
+        return False
 
 
 # === ROTAS ===
@@ -471,93 +672,179 @@ def processar():
             tmp_path = os.path.join(tmp_dir, nome_original)
             arquivo.save(tmp_path)
 
-            # Se PDF maior que 25MB, divide em partes menores
-            ext = Path(nome_original).suffix.lower()
-            if ext == ".pdf" and os.path.getsize(tmp_path) > MAX_FILE_SIZE_BYTES:
-                partes = dividir_pdf_por_tamanho(tmp_path, tmp_dir)
-                for i, parte_path in enumerate(partes):
-                    parte_nome = f"{nome_original} (parte {i+1}/{len(partes)})"
-                    docs_separados = processar_arquivo_completo(client, parte_path, parte_nome, tmp_dir)
-                    resultados.extend(docs_separados)
-            else:
-                # Processa e separa documentos automaticamente
-                docs_separados = processar_arquivo_completo(client, tmp_path, nome_original, tmp_dir)
-                resultados.extend(docs_separados)
+            # Processa e separa documentos automaticamente
+            # (a divisao por tamanho acontece DEPOIS, ao montar o ZIP final)
+            docs_separados = processar_arquivo_completo(client, tmp_path, nome_original, tmp_dir)
+            resultados.extend(docs_separados)
 
-        # Classifica: ordem fixa vs demais (cronologicos)
-        docs_fixos = {cat: [] for cat in DOCS_ORDEM_FIXA}
-        docs_cronologicos = []
+        # ===== ETAPA 1: Anexar protocolos de assinatura ao documento anterior =====
+        # Protocolos vem logo apos o documento assinado no PDF original
+        resultados_processados = []
+        protocolos_pendentes = []
 
         for r in resultados:
-            cat = classificar_doc(r)
-            if cat:
-                docs_fixos[cat].append(r)
+            if eh_protocolo_assinatura(r):
+                # Tenta anexar ao ultimo documento assinavel
+                if resultados_processados:
+                    ultimo = resultados_processados[-1]
+                    cat_ultimo = classificar_doc(ultimo, tipo_processo)
+                    if cat_ultimo in CATEGORIAS_ASSINADAS:
+                        # Merge protocolo com o documento anterior
+                        merged_path = os.path.join(tmp_dir, f"merged_{len(resultados_processados)}.pdf")
+                        if merge_pdfs([ultimo["arquivo_tmp"], r["arquivo_tmp"]], merged_path):
+                            ultimo["arquivo_tmp"] = merged_path
+                            ultimo["nome_original"] += " + protocolo"
+                            continue
+                # Se nao conseguiu anexar, guarda para tentar depois
+                protocolos_pendentes.append(r)
+            else:
+                resultados_processados.append(r)
+
+        # ===== ETAPA 2: Classificar documentos =====
+        sequencia = SEQUENCIA_JUDICIAL if tipo_processo == "judicial" else SEQUENCIA_INSS_ADMIN
+        categorias_validas = [cat for cat, _ in sequencia]
+
+        docs_por_categoria = {cat: [] for cat in categorias_validas}
+        docs_cronologicos = []
+
+        for r in resultados_processados:
+            cat = classificar_doc(r, tipo_processo)
+            if cat and cat in docs_por_categoria:
+                docs_por_categoria[cat].append(r)
             else:
                 docs_cronologicos.append(r)
 
+        # Ordena cronologicamente os demais
         docs_cronologicos.sort(key=lambda r: r.get("data") or "9999-99-99")
+
+        # Ordena cronologicamente dentro das categorias que precisam (CTPS, atestados, etc.)
+        for cat in CATEGORIAS_MERGE:
+            if cat in docs_por_categoria:
+                docs_por_categoria[cat].sort(key=lambda r: r.get("data") or "9999-99-99")
 
         # Monta ZIP
         zip_buffer = io.BytesIO()
         nome_limpo = limpar_nome(nome_cliente)
         nome_pasta = f"{nome_limpo}_{tipo_processo}"
+        limite_mb = LIMITES_TAMANHO.get(tipo_processo, MAX_FILE_SIZE_BYTES) // (1024 * 1024)
         relatorio_linhas = [
             f"Relatorio de Organizacao - {nome_cliente}",
             f"Tipo: {TIPOS_PROCESSO[tipo_processo]}",
             f"Data: {datetime.now().strftime('%Y-%m-%d %H:%M')}",
-            f"Total de documentos separados: {len(resultados)}",
+            f"Total de documentos separados: {len(resultados_processados)}",
+            f"Limite por arquivo: {limite_mb}MB",
             "-" * 50,
             "",
         ]
 
         lista_docs = []
         ordem = 1
-
-        nomes_fixos = {
-            "procuracao": "Procuracao",
-            "declaracao": "Declaracao",
-            "contrato_de_honorarios": "Contrato_de_Honorarios",
-            "termo_de_responsabilidade": "Termo_de_Responsabilidade",
-            "documento_pessoal": None,  # usa o tipo real (RG, CPF, CNH)
-        }
+        limite_arquivo = LIMITES_TAMANHO.get(tipo_processo, MAX_FILE_SIZE_BYTES)
 
         with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
-            # 1) Documentos com ordem fixa
-            for cat in DOCS_ORDEM_FIXA:
-                for r in docs_fixos[cat]:
-                    label = nomes_fixos[cat]
-                    if label is None:
-                        label = limpar_nome(r.get("tipo", "documento"))[:30]
-                        label = label.upper()
-                    novo_nome = f"{ordem:02d}_{nome_limpo}_{label}{r['extensao']}"
-                    zf.write(r["arquivo_tmp"], f"{nome_pasta}/{novo_nome}")
-                    relatorio_linhas.append(
-                        f"{novo_nome} | Original: {r['nome_original']} | Tipo: {r.get('tipo', '?')} | Data: {r.get('data', 'N/A')}"
-                    )
-                    lista_docs.append({
-                        "ordem": ordem,
-                        "nome": novo_nome,
-                        "original": r["nome_original"],
-                        "tipo": r.get("tipo", "?"),
-                        "data": r.get("data"),
-                    })
-                    ordem += 1
+            # ===== ETAPA 3: Adicionar documentos na sequencia correta =====
+            for cat, label in sequencia:
+                docs_cat = docs_por_categoria.get(cat, [])
+                if not docs_cat:
+                    continue
 
-            # 2) Demais documentos em ordem cronologica
+                # Se categoria e MERGE, junta todos em um unico PDF
+                if cat in CATEGORIAS_MERGE and len(docs_cat) > 1:
+                    merged_path = os.path.join(tmp_dir, f"merged_{cat}.pdf")
+                    caminhos = [r["arquivo_tmp"] for r in docs_cat]
+                    if merge_pdfs(caminhos, merged_path):
+                        nome_label = label or limpar_nome(docs_cat[0].get("tipo", "documento"))[:30].upper()
+                        partes = dividir_pdf_por_tamanho(merged_path, tmp_dir, max_bytes=limite_arquivo)
+                        for idx, parte_path in enumerate(partes):
+                            sufixo = f"_parte{idx+1}" if len(partes) > 1 else ""
+                            novo_nome = f"{ordem:02d}_{nome_limpo}_{nome_label}{sufixo}.pdf"
+                            zf.write(parte_path, f"{nome_pasta}/{novo_nome}")
+                            relatorio_linhas.append(
+                                f"{novo_nome} | {len(docs_cat)} docs merged em ordem cronologica"
+                            )
+                            lista_docs.append({
+                                "ordem": ordem, "nome": novo_nome,
+                                "original": f"{len(docs_cat)} documentos merged",
+                                "tipo": label or cat, "data": None,
+                            })
+                            ordem += 1
+                        continue
+
+                # Sem merge: adiciona cada doc individualmente
+                for r in docs_cat:
+                    nome_label = label or limpar_nome(r.get("tipo", "documento"))[:30].upper()
+                    # Verifica tamanho e divide se necessario
+                    if r["extensao"] == ".pdf" and os.path.getsize(r["arquivo_tmp"]) > limite_arquivo:
+                        partes = dividir_pdf_por_tamanho(r["arquivo_tmp"], tmp_dir, max_bytes=limite_arquivo)
+                        for idx, parte_path in enumerate(partes):
+                            sufixo = f"_parte{idx+1}" if len(partes) > 1 else ""
+                            novo_nome = f"{ordem:02d}_{nome_limpo}_{nome_label}{sufixo}{r['extensao']}"
+                            zf.write(parte_path, f"{nome_pasta}/{novo_nome}")
+                            relatorio_linhas.append(
+                                f"{novo_nome} | Original: {r['nome_original']} | Data: {r.get('data', 'N/A')}"
+                            )
+                            lista_docs.append({
+                                "ordem": ordem, "nome": novo_nome,
+                                "original": r["nome_original"],
+                                "tipo": r.get("tipo", "?"), "data": r.get("data"),
+                            })
+                            ordem += 1
+                    else:
+                        novo_nome = f"{ordem:02d}_{nome_limpo}_{nome_label}{r['extensao']}"
+                        zf.write(r["arquivo_tmp"], f"{nome_pasta}/{novo_nome}")
+                        relatorio_linhas.append(
+                            f"{novo_nome} | Original: {r['nome_original']} | Tipo: {r.get('tipo', '?')} | Data: {r.get('data', 'N/A')}"
+                        )
+                        lista_docs.append({
+                            "ordem": ordem, "nome": novo_nome,
+                            "original": r["nome_original"],
+                            "tipo": r.get("tipo", "?"), "data": r.get("data"),
+                        })
+                        ordem += 1
+
+            # ===== ETAPA 4: Demais documentos em ordem cronologica =====
             for r in docs_cronologicos:
                 tipo_limpo = limpar_nome(r.get("tipo", "documento"))[:30]
                 data_str = r.get("data") or "sem_data"
-                novo_nome = f"{ordem:02d}_{nome_limpo}_{data_str}_{tipo_limpo}{r['extensao']}"
+                if r["extensao"] == ".pdf" and os.path.getsize(r["arquivo_tmp"]) > limite_arquivo:
+                    partes = dividir_pdf_por_tamanho(r["arquivo_tmp"], tmp_dir, max_bytes=limite_arquivo)
+                    for idx, parte_path in enumerate(partes):
+                        sufixo = f"_parte{idx+1}" if len(partes) > 1 else ""
+                        novo_nome = f"{ordem:02d}_{nome_limpo}_{data_str}_{tipo_limpo}{sufixo}{r['extensao']}"
+                        zf.write(parte_path, f"{nome_pasta}/{novo_nome}")
+                        relatorio_linhas.append(
+                            f"{novo_nome} | Original: {r['nome_original']} | Data: {r.get('data', 'NAO ENCONTRADA')}"
+                        )
+                        lista_docs.append({
+                            "ordem": ordem, "nome": novo_nome,
+                            "original": r["nome_original"],
+                            "tipo": r.get("tipo", "?"), "data": r.get("data"),
+                        })
+                        ordem += 1
+                else:
+                    novo_nome = f"{ordem:02d}_{nome_limpo}_{data_str}_{tipo_limpo}{r['extensao']}"
+                    zf.write(r["arquivo_tmp"], f"{nome_pasta}/{novo_nome}")
+                    relatorio_linhas.append(
+                        f"{novo_nome} | Original: {r['nome_original']} | Tipo: {r.get('tipo', '?')} | Data: {r.get('data', 'NAO ENCONTRADA')}"
+                    )
+                    lista_docs.append({
+                        "ordem": ordem, "nome": novo_nome,
+                        "original": r["nome_original"],
+                        "tipo": r.get("tipo", "?"), "data": r.get("data"),
+                    })
+                    ordem += 1
+
+            # Protocolos orfaos (caso nao tenham sido anexados)
+            for r in protocolos_pendentes:
+                novo_nome = f"{ordem:02d}_{nome_limpo}_Protocolo_Assinatura{r['extensao']}"
                 zf.write(r["arquivo_tmp"], f"{nome_pasta}/{novo_nome}")
                 relatorio_linhas.append(
-                    f"{novo_nome} | Original: {r['nome_original']} | Tipo: {r.get('tipo', '?')} | Data: {r.get('data', 'NAO ENCONTRADA')}"
+                    f"{novo_nome} | Original: {r['nome_original']} | PROTOCOLO ORFAO"
                 )
                 lista_docs.append({
-                    "ordem": ordem,
-                    "nome": novo_nome,
+                    "ordem": ordem, "nome": novo_nome,
                     "original": r["nome_original"],
-                    "tipo": r.get("tipo", "?"),
-                    "data": r.get("data"),
+                    "tipo": "Protocolo Assinatura", "data": None,
                 })
                 ordem += 1
 
