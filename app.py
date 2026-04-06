@@ -48,6 +48,14 @@ TIPOS_PROCESSO = {
     "civel": "Cível",
 }
 
+USUARIOS = [
+    "Emily", "Karol", "Alan", "Henrique", "Caique", "Jaíne",
+    "Camila", "Luana", "Claudio", "Meire", "André", "Vitória",
+]
+
+# Webhook para registrar uso (configurado via env var)
+LOG_WEBHOOK_URL = os.environ.get("LOG_WEBHOOK_URL", "")
+
 PROMPT_MAPEAMENTO = """Analise o texto de cada pagina deste PDF juridico brasileiro.
 Identifique TODOS os documentos separados que existem dentro deste arquivo.
 
@@ -631,7 +639,32 @@ def merge_pdfs(caminhos, destino):
 
 @app.route("/")
 def index():
-    return render_template("index.html", tipos=TIPOS_PROCESSO)
+    return render_template("index.html", tipos=TIPOS_PROCESSO, usuarios=USUARIOS)
+
+
+def registrar_uso(usuario, nome_cliente, tipo_processo, total_docs, status):
+    """Envia log de uso para webhook (n8n -> Google Sheets)."""
+    if not LOG_WEBHOOK_URL:
+        return
+    try:
+        import urllib.request
+        payload = json.dumps({
+            "timestamp": datetime.now().isoformat(),
+            "usuario": usuario,
+            "cliente": nome_cliente,
+            "tipo_processo": TIPOS_PROCESSO.get(tipo_processo, tipo_processo),
+            "total_documentos": total_docs,
+            "status": status,
+        }).encode("utf-8")
+        req = urllib.request.Request(
+            LOG_WEBHOOK_URL,
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        urllib.request.urlopen(req, timeout=5)
+    except Exception:
+        pass  # nao quebra o app se o log falhar
 
 
 @app.route("/processar", methods=["POST"])
@@ -642,9 +675,12 @@ def processar():
     if not api_key:
         return jsonify({"erro": "API key nao configurada no servidor"}), 500
 
+    usuario = request.form.get("usuario", "").strip()
     nome_cliente = request.form.get("nome_cliente", "").strip()
     tipo_processo = request.form.get("tipo_processo", "").strip()
 
+    if not usuario or usuario not in USUARIOS:
+        return jsonify({"erro": "Selecione o usuario que esta processando"}), 400
     if not nome_cliente:
         return jsonify({"erro": "Nome do cliente e obrigatorio"}), 400
     if tipo_processo not in TIPOS_PROCESSO:
@@ -860,6 +896,9 @@ def processar():
 
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
+        # Registra o uso na planilha (via webhook n8n)
+        registrar_uso(usuario, nome_cliente, tipo_processo, len(resultados), "sucesso")
+
         return jsonify({
             "sucesso": True,
             "nome_pasta": nome_pasta,
@@ -871,6 +910,7 @@ def processar():
 
     except Exception as e:
         shutil.rmtree(tmp_dir, ignore_errors=True)
+        registrar_uso(usuario, nome_cliente, tipo_processo, 0, f"erro: {str(e)[:100]}")
         return jsonify({"erro": str(e)}), 500
 
 

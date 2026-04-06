@@ -416,6 +416,14 @@
     <div id="formulario">
         <div class="card">
             <div class="card-title"><span class="num">1</span> Dados do Caso</div>
+            <label for="usuario">Quem esta processando</label>
+            <select id="usuario">
+                <option value="">Selecione seu nome...</option>
+                {% for u in usuarios %}
+                <option value="{{ u }}">{{ u }}</option>
+                {% endfor %}
+            </select>
+            <div style="height: 12px;"></div>
             <label for="nome_cliente">Nome do Cliente</label>
             <input type="text" id="nome_cliente" placeholder="Ex: Maria da Silva" autocomplete="off">
             <div style="height: 12px;"></div>
@@ -571,27 +579,41 @@
     }
 
     function validarForm() {
+        const usuario = document.getElementById('usuario').value;
         const nome = document.getElementById('nome_cliente').value.trim();
         const tipo = document.getElementById('tipo_processo').value;
-        btnOrganizar.disabled = !(nome && tipo && arquivos.length > 0);
+        btnOrganizar.disabled = !(usuario && nome && tipo && arquivos.length > 0);
     }
 
+    document.getElementById('usuario').addEventListener('change', () => {
+        // Salva no localStorage para nao precisar selecionar toda vez
+        localStorage.setItem('usuario_organizador', document.getElementById('usuario').value);
+        validarForm();
+    });
     document.getElementById('nome_cliente').addEventListener('input', validarForm);
     document.getElementById('tipo_processo').addEventListener('change', validarForm);
+
+    // Restaura usuario salvo
+    const usuarioSalvo = localStorage.getItem('usuario_organizador');
+    if (usuarioSalvo) {
+        document.getElementById('usuario').value = usuarioSalvo;
+    }
 
     // Enviar
     btnOrganizar.addEventListener('click', async () => {
         erro.classList.remove('show');
+        const usuario = document.getElementById('usuario').value;
         const nome = document.getElementById('nome_cliente').value.trim();
         const tipo = document.getElementById('tipo_processo').value;
 
-        if (!nome || !tipo || arquivos.length === 0) return;
+        if (!usuario || !nome || !tipo || arquivos.length === 0) return;
 
         // Mostra progresso
         progressText.textContent = `Analisando ${arquivos.length} documento(s)...`;
         progresso.classList.add('show');
 
         const formData = new FormData();
+        formData.append('usuario', usuario);
         formData.append('nome_cliente', nome);
         formData.append('tipo_processo', tipo);
         arquivos.forEach(f => formData.append('documentos', f));
