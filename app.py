@@ -649,11 +649,11 @@ def registrar_uso(usuario, nome_cliente, tipo_processo, total_docs, status):
     try:
         import urllib.request
         payload = json.dumps({
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "usuario": usuario,
             "cliente": nome_cliente,
             "tipo_processo": TIPOS_PROCESSO.get(tipo_processo, tipo_processo),
-            "total_documentos": total_docs,
+            "total_documentos": str(total_docs),
             "status": status,
         }).encode("utf-8")
         req = urllib.request.Request(
