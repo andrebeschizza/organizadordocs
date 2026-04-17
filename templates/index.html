@@ -608,9 +608,19 @@
 
         if (!usuario || !nome || !tipo || arquivos.length === 0) return;
 
-        // Mostra progresso
+        // Mostra progresso com timer
+        let segundos = 0;
         progressText.textContent = `Analisando ${arquivos.length} documento(s)...`;
+        document.querySelector('.progress-hint').textContent = 'A IA esta lendo cada documento';
         progresso.classList.add('show');
+
+        const timer = setInterval(() => {
+            segundos++;
+            if (segundos >= 15) {
+                document.querySelector('.progress-hint').textContent =
+                    `Processando... ${segundos}s (pode levar ate 3 minutos)`;
+            }
+        }, 1000);
 
         const formData = new FormData();
         formData.append('usuario', usuario);
@@ -618,11 +628,18 @@
         formData.append('tipo_processo', tipo);
         arquivos.forEach(f => formData.append('documentos', f));
 
+        // Timeout de 5 minutos para processos grandes
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 300000);
+
         try {
             const resp = await fetch('/processar', {
                 method: 'POST',
                 body: formData,
+                signal: controller.signal,
             });
+            clearTimeout(timeoutId);
+            clearInterval(timer);
             const data = await resp.json();
 
             progresso.classList.remove('show');
@@ -664,8 +681,14 @@
             document.getElementById('btnDownload').href = `/download/${data.nome_pasta}`;
 
         } catch (e) {
+            clearTimeout(timeoutId);
+            clearInterval(timer);
             progresso.classList.remove('show');
-            erro.textContent = 'Erro de conexao. Tente novamente.';
+            if (e.name === 'AbortError') {
+                erro.textContent = 'Tempo esgotado. Tente com menos documentos ou arquivos menores.';
+            } else {
+                erro.textContent = 'Erro de conexao. Tente novamente.';
+            }
             erro.classList.add('show');
         }
     });

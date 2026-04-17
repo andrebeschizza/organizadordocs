@@ -110,13 +110,24 @@ Responda APENAS em JSON valido, sem markdown:
 Se nao encontrar data, use "data": null.
 """
 
+PROMPT_MAPEAMENTO_CURTO = """Identifique os documentos nestas paginas de PDF juridico brasileiro.
+Para cada documento encontrado, indique tipo, pagina de inicio, pagina de fim e data de emissao.
+Tipos comuns: Procuracao, Substabelecimento, Declaracao, Contrato de Honorarios, Termo de Representacao,
+Protocolo de Assinatura, RG, CPF, CNH, CNIS, CTPS, Atestado/Relatorio/Receita Medica, Laudo, Certidao, PPP, LTCAT, GPS.
+
+Responda APENAS em JSON valido:
+{"documentos": [{"tipo": "...", "pagina_inicio": 1, "pagina_fim": 2, "data": "YYYY-MM-DD"}]}
+Se nao encontrar data, use "data": null.
+"""
+
+CHUNK_SIZE_PAGINAS = 8  # paginas por chunk para PDFs grandes
+
 # Sequencia para INSS Administrativo (simples)
+# Nota: procuracao + substabelecimento + termo ficam agrupados em 1 arquivo
 SEQUENCIA_INSS_ADMIN = [
-    ("procuracao", "Procuracao"),
-    ("substabelecimento", "Substabelecimento"),
+    ("grupo_procuracao_termos", "Procuracao_e_Termos"),
     ("declaracao", "Declaracao"),
     ("contrato_de_honorarios", "Contrato_de_Honorarios"),
-    ("termo_de_responsabilidade", "Termo_de_Responsabilidade"),
     ("documento_pessoal", None),  # usa tipo real
 ]
 
@@ -164,6 +175,7 @@ CATEGORIAS_MERGE = {
     "declaracao_tempo_servico",
     "ficha_financeira",
     "gps",
+    "grupo_procuracao_termos",  # admin: procuracao+substabelecimento+termo juntos
 }
 
 # Categorias que devem receber o "protocolo de assinatura" anexado
@@ -174,6 +186,11 @@ CATEGORIAS_ASSINADAS = {
     "declaracao_hipossuficiencia",
     "contrato_de_honorarios",
     "termo_de_responsabilidade",
+}
+
+# Para INSS admin: agrupar estas categorias em uma so (ficam num unico PDF)
+GRUPO_MERGE_ADMIN = {
+    "grupo_procuracao_termos": ["procuracao", "substabelecimento", "termo_de_responsabilidade"],
 }
 
 
@@ -192,14 +209,20 @@ def extrair_textos_todas_paginas(caminho):
         paginas = []
         with pdfplumber.open(caminho) as pdf:
             total = min(len(pdf.pages), MAX_PAGINAS_PDF)
+            # PDFs grandes: menos texto por pagina para economizar memoria e tokens
+            if total > CHUNK_SIZE_PAGINAS:
+                max_linhas = 10
+                max_chars = 500
+            else:
+                max_linhas = 15
+                max_chars = MAX_TEXTO_POR_PAGINA
             for i in range(total):
                 try:
                     texto = pdf.pages[i].extract_text() or ""
                 except Exception:
                     texto = ""
-                # Pega so as primeiras linhas de cada pagina (suficiente para identificar tipo)
-                linhas = texto.split("\n")[:15]
-                paginas.append({"pagina": i + 1, "texto": "\n".join(linhas)[:MAX_TEXTO_POR_PAGINA]})
+                linhas = texto.split("\n")[:max_linhas]
+                paginas.append({"pagina": i + 1, "texto": "\n".join(linhas)[:max_chars]})
         return paginas
     except Exception:
         return []
@@ -284,6 +307,83 @@ def separar_pdf(caminho_original, pagina_inicio, pagina_fim, caminho_destino):
         return False
 
 
+def _parse_json_response(resposta):
+    """Parse JSON da resposta da IA, lidando com markdown code blocks."""
+    resposta = resposta.strip()
+    if resposta.startswith("{"):
+        return json.loads(resposta)
+    if "```" in resposta:
+        json_str = resposta.split("```")[1]
+        if json_str.startswith("json"):
+            json_str = json_str[4:]
+        return json.loads(json_str.strip())
+    return json.loads(resposta)
+
+
+def _mapear_chunk(client, caminho, nome_arquivo, chunk_paginas):
+    """Mapeia documentos em um chunk de paginas (max CHUNK_SIZE_PAGINAS)."""
+    texto_chunk = ""
+    for p in chunk_paginas:
+        texto_chunk += f"\n--- PAGINA {p['pagina']} ---\n{p['texto']}\n"
+
+    # Para paginas sem texto no chunk, tenta imagem (max 1 por chunk para economizar)
+    imagens_content = []
+    paginas_sem_texto = [p for p in chunk_paginas if not p["texto"].strip()]
+    if paginas_sem_texto and len(paginas_sem_texto) <= 2:
+        p = paginas_sem_texto[0]
+        img_b64 = pagina_para_imagem_b64(caminho, p["pagina"])
+        if img_b64:
+            imagens_content.append({"type": "text", "text": f"--- PAGINA {p['pagina']} (imagem) ---"})
+            imagens_content.append({
+                "type": "image",
+                "source": {"type": "base64", "media_type": "image/jpeg", "data": img_b64},
+            })
+            img_b64 = None
+
+    pag_inicio = chunk_paginas[0]["pagina"]
+    pag_fim = chunk_paginas[-1]["pagina"]
+
+    messages_content = [{"type": "text",
+        "text": f"Arquivo: {nome_arquivo} (paginas {pag_inicio}-{pag_fim})\n\n{texto_chunk}"}]
+    messages_content.extend(imagens_content)
+
+    try:
+        response = client.messages.create(
+            model=MODELO_IA,
+            max_tokens=800,
+            messages=[{"role": "user", "content": messages_content + [
+                {"type": "text", "text": PROMPT_MAPEAMENTO_CURTO}
+            ]}],
+        )
+        dados = _parse_json_response(response.content[0].text)
+        docs = dados.get("documentos", [])
+        if docs:
+            return docs
+    except Exception:
+        pass
+
+    # Fallback: chunk inteiro como documento unico
+    return [{"tipo": "desconhecido", "pagina_inicio": pag_inicio, "pagina_fim": pag_fim, "data": None}]
+
+
+def _merge_boundary_docs(docs):
+    """Junta documentos do mesmo tipo que ficaram separados na fronteira entre chunks."""
+    if len(docs) <= 1:
+        return docs
+    merged = [docs[0]]
+    for doc in docs[1:]:
+        prev = merged[-1]
+        # Mesmo tipo e paginas consecutivas? Provavelmente o mesmo documento
+        if (limpar_nome(doc.get("tipo", "")) == limpar_nome(prev.get("tipo", "")) and
+                doc.get("pagina_inicio", 0) == prev.get("pagina_fim", 0) + 1):
+            prev["pagina_fim"] = doc["pagina_fim"]
+            if doc.get("data") and not prev.get("data"):
+                prev["data"] = doc["data"]
+        else:
+            merged.append(doc)
+    return merged
+
+
 def mapear_documentos_pdf(client, caminho, nome_arquivo):
     """Analisa PDF com multiplas paginas e identifica cada documento separado."""
     paginas = extrair_textos_todas_paginas(caminho)
@@ -310,62 +410,60 @@ def mapear_documentos_pdf(client, caminho, nome_arquivo):
         return [{"tipo": resultado.get("tipo", "desconhecido"), "pagina_inicio": 1,
                  "pagina_fim": 1, "data": resultado.get("data")}]
 
-    # PDF com multiplas paginas - pede para IA mapear todos os documentos
-    texto_completo = ""
-    for p in paginas:
-        texto_completo += f"\n--- PAGINA {p['pagina']} ---\n{p['texto']}\n"
+    # === PDF pequeno (ate CHUNK_SIZE paginas): chamada unica (comportamento original) ===
+    if total_paginas <= CHUNK_SIZE_PAGINAS:
+        texto_completo = ""
+        for p in paginas:
+            texto_completo += f"\n--- PAGINA {p['pagina']} ---\n{p['texto']}\n"
 
-    # Para paginas sem texto (escaneadas), envia imagem apenas da primeira pagina sem texto
-    paginas_sem_texto = [p for p in paginas if not p["texto"].strip()]
-    imagens_content = []
-    if paginas_sem_texto and len(paginas_sem_texto) <= 3:
-        for p in paginas_sem_texto[:2]:  # max 2 imagens para nao estourar memoria
-            img_b64 = pagina_para_imagem_b64(caminho, p["pagina"])
-            if img_b64:
-                imagens_content.append({
-                    "type": "text", "text": f"--- PAGINA {p['pagina']} (imagem) ---"
-                })
-                imagens_content.append({
-                    "type": "image",
-                    "source": {"type": "base64", "media_type": "image/jpeg", "data": img_b64},
-                })
-                img_b64 = None  # libera memoria
+        paginas_sem_texto = [p for p in paginas if not p["texto"].strip()]
+        imagens_content = []
+        if paginas_sem_texto and len(paginas_sem_texto) <= 3:
+            for p in paginas_sem_texto[:2]:
+                img_b64 = pagina_para_imagem_b64(caminho, p["pagina"])
+                if img_b64:
+                    imagens_content.append({"type": "text", "text": f"--- PAGINA {p['pagina']} (imagem) ---"})
+                    imagens_content.append({
+                        "type": "image",
+                        "source": {"type": "base64", "media_type": "image/jpeg", "data": img_b64},
+                    })
+                    img_b64 = None
 
-    messages_content = []
-    messages_content.append({
-        "type": "text",
-        "text": f"Arquivo: {nome_arquivo} ({total_paginas} paginas)\n\n{texto_completo}"
-    })
-    messages_content.extend(imagens_content)
+        messages_content = [{"type": "text",
+            "text": f"Arquivo: {nome_arquivo} ({total_paginas} paginas)\n\n{texto_completo}"}]
+        messages_content.extend(imagens_content)
 
-    try:
-        response = client.messages.create(
-            model=MODELO_IA,
-            max_tokens=1000,
-            messages=[
-                {"role": "user", "content": messages_content},
-                {"role": "user", "content": PROMPT_MAPEAMENTO},
-            ],
-        )
-        resposta = response.content[0].text.strip()
-        if resposta.startswith("{"):
-            dados = json.loads(resposta)
-        elif "```" in resposta:
-            json_str = resposta.split("```")[1]
-            if json_str.startswith("json"):
-                json_str = json_str[4:]
-            dados = json.loads(json_str.strip())
-        else:
-            dados = json.loads(resposta)
+        try:
+            response = client.messages.create(
+                model=MODELO_IA,
+                max_tokens=1000,
+                messages=[
+                    {"role": "user", "content": messages_content},
+                    {"role": "user", "content": PROMPT_MAPEAMENTO},
+                ],
+            )
+            dados = _parse_json_response(response.content[0].text)
+            docs = dados.get("documentos", [])
+            if docs:
+                return docs
+        except Exception:
+            pass
 
-        docs = dados.get("documentos", [])
-        if docs:
-            return docs
-    except Exception:
-        pass
+        return [{"tipo": "desconhecido", "pagina_inicio": 1, "pagina_fim": total_paginas, "data": None}]
 
-    # Fallback: trata como documento unico
-    return [{"tipo": "desconhecido", "pagina_inicio": 1, "pagina_fim": total_paginas, "data": None}]
+    # === PDF grande: processa em chunks de CHUNK_SIZE_PAGINAS paginas ===
+    todos_docs = []
+    for i in range(0, total_paginas, CHUNK_SIZE_PAGINAS):
+        chunk = paginas[i:i + CHUNK_SIZE_PAGINAS]
+        chunk_docs = _mapear_chunk(client, caminho, nome_arquivo, chunk)
+        todos_docs.extend(chunk_docs)
+
+    # Junta documentos que ficaram divididos na fronteira entre chunks
+    todos_docs = _merge_boundary_docs(todos_docs)
+
+    return todos_docs if todos_docs else [
+        {"tipo": "desconhecido", "pagina_inicio": 1, "pagina_fim": total_paginas, "data": None}
+    ]
 
 
 def analisar_texto_simples(client, texto, nome_arquivo):
@@ -705,13 +803,23 @@ def processar():
 
         for arquivo in arquivos_validos:
             nome_original = arquivo.filename
+            ext = Path(nome_original).suffix.lower()
             tmp_path = os.path.join(tmp_dir, nome_original)
             arquivo.save(tmp_path)
 
-            # Processa e separa documentos automaticamente
-            # (a divisao por tamanho acontece DEPOIS, ao montar o ZIP final)
-            docs_separados = processar_arquivo_completo(client, tmp_path, nome_original, tmp_dir)
-            resultados.extend(docs_separados)
+            try:
+                # Processa e separa documentos automaticamente
+                docs_separados = processar_arquivo_completo(client, tmp_path, nome_original, tmp_dir)
+                resultados.extend(docs_separados)
+            except Exception:
+                # Nao falha o request inteiro — adiciona como documento desconhecido
+                resultados.append({
+                    "tipo": "desconhecido",
+                    "data": None,
+                    "arquivo_tmp": tmp_path,
+                    "nome_original": nome_original,
+                    "extensao": ext,
+                })
 
         # ===== ETAPA 1: Anexar protocolos de assinatura ao documento anterior =====
         # Protocolos vem logo apos o documento assinado no PDF original
@@ -737,8 +845,13 @@ def processar():
                 resultados_processados.append(r)
 
         # ===== ETAPA 2: Classificar documentos =====
-        sequencia = SEQUENCIA_JUDICIAL if tipo_processo == "judicial" else SEQUENCIA_INSS_ADMIN
+        sequencia = SEQUENCIA_JUDICIAL if tipo_processo != "inss_admin" else SEQUENCIA_INSS_ADMIN
         categorias_validas = [cat for cat, _ in sequencia]
+
+        # Para admin, tambem inclui categorias individuais que serao reagrupadas
+        if tipo_processo == "inss_admin":
+            for grupo, componentes in GRUPO_MERGE_ADMIN.items():
+                categorias_validas.extend(componentes)
 
         docs_por_categoria = {cat: [] for cat in categorias_validas}
         docs_cronologicos = []
@@ -750,12 +863,25 @@ def processar():
             else:
                 docs_cronologicos.append(r)
 
+        # ===== ETAPA 2.5: Para admin, agrupar procuracao+substabelecimento+termo =====
+        if tipo_processo == "inss_admin":
+            for grupo, componentes in GRUPO_MERGE_ADMIN.items():
+                grupo_docs = []
+                for comp in componentes:
+                    grupo_docs.extend(docs_por_categoria.pop(comp, []))
+                if grupo_docs:
+                    # Ordena na sequencia: procuracao primeiro, depois substabelecimento, depois termo
+                    ordem_componentes = {c: i for i, c in enumerate(componentes)}
+                    grupo_docs.sort(key=lambda r: ordem_componentes.get(
+                        classificar_doc(r, tipo_processo), 99))
+                    docs_por_categoria[grupo] = grupo_docs
+
         # Ordena cronologicamente os demais
         docs_cronologicos.sort(key=lambda r: r.get("data") or "9999-99-99")
 
-        # Ordena cronologicamente dentro das categorias que precisam (CTPS, atestados, etc.)
+        # Ordena cronologicamente dentro das categorias MERGE (CTPS, atestados, etc.)
         for cat in CATEGORIAS_MERGE:
-            if cat in docs_por_categoria:
+            if cat in docs_por_categoria and cat not in GRUPO_MERGE_ADMIN:
                 docs_por_categoria[cat].sort(key=lambda r: r.get("data") or "9999-99-99")
 
         # Monta ZIP
