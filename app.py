@@ -8,6 +8,8 @@ Separa automaticamente PDFs com multiplos documentos em arquivos individuais.
 import os
 import io
 import json
+import uuid
+import time
 import base64
 import shutil
 import zipfile
@@ -27,8 +29,8 @@ SHARED_ZIP_DIR.mkdir(exist_ok=True)
 
 MODELO_IA = "claude-haiku-4-5-20251001"
 EXTENSOES_ACEITAS = {".pdf", ".jpg", ".jpeg", ".png", ".docx"}
-MAX_TEXTO_POR_PAGINA = 800  # menor para economizar memoria
-MAX_PAGINAS_PDF = 30  # limite de paginas para evitar OOM
+MAX_TEXTO_POR_PAGINA = 2000  # contexto maior para IA classificar melhor
+MAX_PAGINAS_PDF = 100  # suporta PDFs grandes (antes era 30 = perdia paginas)
 
 # Limite de tamanho por tipo de processo (em bytes)
 LIMITES_TAMANHO = {
@@ -59,50 +61,77 @@ LOG_WEBHOOK_URL = os.environ.get("LOG_WEBHOOK_URL", "")
 PROMPT_MAPEAMENTO = """Analise o texto de cada pagina deste PDF juridico brasileiro.
 Identifique TODOS os documentos separados que existem dentro deste arquivo.
 
-Tipos comuns de documentos:
-- Procuracao, Substabelecimento
-- Declaracao de Hipossuficiencia/Pobreza, Declaracao
+IMPORTANTE: Responda SEMPRE em portugues brasileiro. NUNCA use ingles.
+Use EXATAMENTE um destes tipos (escreva identico, sem traduzir):
+- Procuracao
+- Substabelecimento
+- Declaracao de Hipossuficiencia
+- Declaracao (outras declaracoes sem ser hipossuficiencia)
 - Contrato de Honorarios
-- Termo de Responsabilidade, Termo de Representacao
-- Protocolo de Assinatura (gerado por DocuSign, Clicksign, ZapSign, D4Sign, etc. - geralmente vem APOS um documento assinado)
-- RG, CPF, CNH, Documento de Identidade
-- CNIS, CTPS, Carteira de Trabalho
-- Carta Indeferimento INSS, Decisao INSS
-- Atestado Medico, Relatorio Medico, Receita Medica
-- Exame Medico, Laudo Medico, Laudo MeuINSS
-- Certidao de Casamento, Certidao de Nascimento, Certidao de Obito
-- Termo de Homologacao Atividade Rural, Documentos Rurais
-- Folha V7, Declaracao de Tempo de Servico, Ficha do Funcionario
-- Certidao de Tempo de Servico, Ficha Financeira
-- PPP - Perfil Profissiografico Previdenciario
-- LTCAT - Laudo Tecnico das Condicoes de Trabalho
-- GPS - Guia Pagamento Previdencia Social
-- Comprovante de Residencia, Comprovante de Gasto
+- Termo de Responsabilidade
+- Termo de Representacao
+- Protocolo de Assinatura (gerado por DocuSign, Clicksign, ZapSign, D4Sign - vem APOS documento assinado)
+- RG
+- CPF
+- CNH
+- Documento de Identidade
+- CNIS
+- CTPS
+- Carta Indeferimento INSS
+- Decisao INSS
+- Atestado Medico
+- Relatorio Medico
+- Receita Medica
+- Exame Medico
+- Laudo Medico
+- Laudo MeuINSS
+- Certidao de Casamento
+- Certidao de Nascimento
+- Certidao de Obito
+- Termo de Homologacao Atividade Rural
+- Documentos Rurais
+- Folha V7
+- Declaracao Tempo de Servico
+- Ficha Funcionario
+- Certidao Tempo de Servico
+- Ficha Financeira
+- PPP
+- LTCAT
+- GPS
+- Comprovante de Residencia
+- Comprovante de Gasto
 - Foto de Residencia
-- Avaliacao Social, Pericia Medica
-- Contagem de Tempo, Calculo Renda Mensal
+- Avaliacao Social
+- Pericia Medica
+- Contagem de Tempo
+- Calculo Renda Mensal
 - Copia Processo Administrativo
 - Certidao Negativa Justica Estadual
 
-IMPORTANTE:
+REGRAS:
 - Cada documento pode ter 1 ou mais paginas
-- "Protocolo de Assinatura" e um documento separado mas geralmente segue o documento assinado (procuracao, declaracao, etc.)
+- Uma procuracao de 3 paginas NAO e 3 procuracoes - e UMA procuracao (pagina_inicio=1, pagina_fim=3)
+- "Protocolo de Assinatura" e um documento separado que vem APOS o documento assinado
 - Identifique onde cada documento COMECA e TERMINA
+- A data deve ser a data de emissao/expedicao do documento (no texto), NAO a data de hoje
 
 Responda APENAS em JSON valido, sem markdown:
 {"documentos": [
-  {"tipo": "Procuracao", "pagina_inicio": 1, "pagina_fim": 2, "data": "YYYY-MM-DD"},
-  {"tipo": "Protocolo de Assinatura", "pagina_inicio": 3, "pagina_fim": 3, "data": null},
-  {"tipo": "RG", "pagina_inicio": 4, "pagina_fim": 4, "data": null}
+  {"tipo": "Procuracao", "pagina_inicio": 1, "pagina_fim": 3, "data": "2023-03-15"},
+  {"tipo": "Protocolo de Assinatura", "pagina_inicio": 4, "pagina_fim": 4, "data": null},
+  {"tipo": "RG", "pagina_inicio": 5, "pagina_fim": 5, "data": null}
 ]}
 
 Se nao encontrar data, use "data": null.
 """
 
 PROMPT_EXTRACAO_SIMPLES = """Analise este documento juridico brasileiro.
+
+IMPORTANTE: Responda SEMPRE em portugues brasileiro, nunca em ingles.
+
 Extraia:
-1. Tipo do documento (use os tipos: Procuracao, Substabelecimento, Declaracao de Hipossuficiencia, Contrato de Honorarios, Termo de Responsabilidade, Protocolo de Assinatura, RG, CPF, CNH, CNIS, CTPS, Carta Indeferimento INSS, Atestado Medico, Relatorio Medico, Receita Medica, Exame Medico, Laudo Medico, Laudo MeuINSS, Certidao de Casamento, Certidao de Nascimento, Certidao de Obito, Documentos Rurais, Folha V7, Declaracao Tempo Servico, Ficha Funcionario, Certidao Tempo Servico, Ficha Financeira, PPP, LTCAT, GPS, Comprovante Residencia, Comprovante Gasto, Foto Residencia, etc.)
-2. Data de emissao/expedicao do documento
+1. Tipo do documento (use EXATAMENTE: Procuracao, Substabelecimento, Declaracao de Hipossuficiencia, Declaracao, Contrato de Honorarios, Termo de Responsabilidade, Termo de Representacao, Protocolo de Assinatura, RG, CPF, CNH, CNIS, CTPS, Carta Indeferimento INSS, Atestado Medico, Relatorio Medico, Receita Medica, Exame Medico, Laudo Medico, Laudo MeuINSS, Certidao de Casamento, Certidao de Nascimento, Certidao de Obito, Documentos Rurais, Folha V7, Declaracao Tempo Servico, Ficha Funcionario, Certidao Tempo Servico, Ficha Financeira, PPP, LTCAT, GPS, Comprovante Residencia, Comprovante Gasto, Foto Residencia)
+2. Data de emissao/expedicao DO DOCUMENTO (lida no texto, NAO a data atual)
 
 Responda APENAS em JSON valido, sem markdown:
 {"tipo": "...", "data": "YYYY-MM-DD"}
@@ -111,23 +140,27 @@ Se nao encontrar data, use "data": null.
 """
 
 PROMPT_MAPEAMENTO_CURTO = """Identifique os documentos nestas paginas de PDF juridico brasileiro.
-Para cada documento encontrado, indique tipo, pagina de inicio, pagina de fim e data de emissao.
-Tipos comuns: Procuracao, Substabelecimento, Declaracao, Contrato de Honorarios, Termo de Representacao,
-Protocolo de Assinatura, RG, CPF, CNH, CNIS, CTPS, Atestado/Relatorio/Receita Medica, Laudo, Certidao, PPP, LTCAT, GPS.
+
+IMPORTANTE: Responda SEMPRE em portugues brasileiro. Uma procuracao de 3 paginas e UMA procuracao (nao 3).
+Tipos permitidos: Procuracao, Substabelecimento, Declaracao de Hipossuficiencia, Declaracao, Contrato de Honorarios, Termo de Responsabilidade, Termo de Representacao, Protocolo de Assinatura, RG, CPF, CNH, CNIS, CTPS, Atestado Medico, Relatorio Medico, Receita Medica, Exame Medico, Laudo, Certidao, PPP, LTCAT, GPS, Comprovante Residencia, Comprovante Gasto.
+
+Para cada documento, indique: tipo, pagina de inicio, pagina de fim, data de emissao (do texto, nao hoje).
 
 Responda APENAS em JSON valido:
-{"documentos": [{"tipo": "...", "pagina_inicio": 1, "pagina_fim": 2, "data": "YYYY-MM-DD"}]}
+{"documentos": [{"tipo": "...", "pagina_inicio": 1, "pagina_fim": 3, "data": "YYYY-MM-DD"}]}
 Se nao encontrar data, use "data": null.
 """
 
 CHUNK_SIZE_PAGINAS = 8  # paginas por chunk para PDFs grandes
 
-# Sequencia para INSS Administrativo (simples)
-# Nota: procuracao + substabelecimento + termo ficam agrupados em 1 arquivo
+# Sequencia para INSS Administrativo
+# IMPORTANTE:
+# - grupo_procuracao_termos = procuracoes + substabelecimentos + termos + declaracoes + protocolos juntos
+# - contrato_de_honorarios FICA SEMPRE SEPARADO (documento sigiloso entre advogado e cliente,
+#   nao compoe os documentos do processo)
 SEQUENCIA_INSS_ADMIN = [
-    ("grupo_procuracao_termos", "Procuracao_e_Termos"),
-    ("declaracao", "Declaracao"),
-    ("contrato_de_honorarios", "Contrato_de_Honorarios"),
+    ("grupo_procuracao_termos", "Procuracao_Termos_Declaracoes"),
+    ("contrato_de_honorarios", "Contrato_de_Honorarios_SIGILOSO"),
     ("documento_pessoal", None),  # usa tipo real
 ]
 
@@ -188,9 +221,18 @@ CATEGORIAS_ASSINADAS = {
     "termo_de_responsabilidade",
 }
 
-# Para INSS admin: agrupar estas categorias em uma so (ficam num unico PDF)
+# Para INSS admin: agrupar estas categorias em UM UNICO arquivo
+# (procuracoes + substabelecimentos + termos + declaracoes + protocolos de assinatura)
+# NOTA: contrato_de_honorarios NAO entra aqui (fica sempre separado, e sigiloso)
 GRUPO_MERGE_ADMIN = {
-    "grupo_procuracao_termos": ["procuracao", "substabelecimento", "termo_de_responsabilidade"],
+    "grupo_procuracao_termos": [
+        "procuracao",
+        "substabelecimento",
+        "termo_de_responsabilidade",
+        "declaracao",
+        "declaracao_hipossuficiencia",
+        "protocolo_assinatura",
+    ],
 }
 
 
@@ -202,19 +244,33 @@ def limpar_nome(texto):
     return texto
 
 
-def extrair_textos_todas_paginas(caminho):
-    """Extrai texto de todas as paginas de um PDF (com limite para economizar memoria)."""
-    import pdfplumber
+def contar_paginas_pdf(caminho):
+    """Conta total de paginas de um PDF sem extrair texto."""
     try:
-        paginas = []
+        from pypdf import PdfReader
+        return len(PdfReader(caminho).pages)
+    except Exception:
+        return 0
+
+
+def extrair_textos_todas_paginas(caminho):
+    """Extrai texto de todas as paginas de um PDF.
+    Retorna dict com paginas + aviso caso tenha truncado."""
+    import pdfplumber
+    resultado = {"paginas": [], "total_real": 0, "truncado": False}
+    try:
         with pdfplumber.open(caminho) as pdf:
-            total = min(len(pdf.pages), MAX_PAGINAS_PDF)
+            total_real = len(pdf.pages)
+            resultado["total_real"] = total_real
+            total = min(total_real, MAX_PAGINAS_PDF)
+            if total_real > MAX_PAGINAS_PDF:
+                resultado["truncado"] = True
             # PDFs grandes: menos texto por pagina para economizar memoria e tokens
             if total > CHUNK_SIZE_PAGINAS:
-                max_linhas = 10
-                max_chars = 500
-            else:
                 max_linhas = 15
+                max_chars = 1000
+            else:
+                max_linhas = 20
                 max_chars = MAX_TEXTO_POR_PAGINA
             for i in range(total):
                 try:
@@ -222,10 +278,10 @@ def extrair_textos_todas_paginas(caminho):
                 except Exception:
                     texto = ""
                 linhas = texto.split("\n")[:max_linhas]
-                paginas.append({"pagina": i + 1, "texto": "\n".join(linhas)[:max_chars]})
-        return paginas
+                resultado["paginas"].append({"pagina": i + 1, "texto": "\n".join(linhas)[:max_chars]})
+        return resultado
     except Exception:
-        return []
+        return resultado
 
 
 def dividir_pdf_por_tamanho(caminho, tmp_dir, max_bytes=MAX_FILE_SIZE_BYTES):
@@ -386,7 +442,10 @@ def _merge_boundary_docs(docs):
 
 def mapear_documentos_pdf(client, caminho, nome_arquivo):
     """Analisa PDF com multiplas paginas e identifica cada documento separado."""
-    paginas = extrair_textos_todas_paginas(caminho)
+    dados_extracao = extrair_textos_todas_paginas(caminho)
+    paginas = dados_extracao["paginas"]
+    truncado = dados_extracao.get("truncado", False)
+    total_real = dados_extracao.get("total_real", 0)
 
     if not paginas:
         # PDF escaneado - tenta via imagem da primeira pagina
@@ -399,6 +458,11 @@ def mapear_documentos_pdf(client, caminho, nome_arquivo):
 
     total_paginas = len(paginas)
 
+    # Se PDF foi truncado, avisa nos resultados (pagina extra invisivel que o usuario pode ver no relatorio)
+    aviso_truncado = None
+    if truncado:
+        aviso_truncado = f"ATENCAO: PDF tem {total_real} paginas, so foram analisadas as primeiras {MAX_PAGINAS_PDF}. Divida o arquivo em partes menores."
+
     if total_paginas == 1:
         # PDF de 1 pagina - analise simples
         texto = paginas[0]["texto"]
@@ -407,8 +471,11 @@ def mapear_documentos_pdf(client, caminho, nome_arquivo):
         else:
             img_b64 = pagina_para_imagem_b64(caminho, 1)
             resultado = analisar_imagem_simples(client, img_b64, nome_arquivo) if img_b64 else {"tipo": "desconhecido", "data": None}
-        return [{"tipo": resultado.get("tipo", "desconhecido"), "pagina_inicio": 1,
-                 "pagina_fim": 1, "data": resultado.get("data")}]
+        doc = {"tipo": resultado.get("tipo", "desconhecido"), "pagina_inicio": 1,
+                 "pagina_fim": 1, "data": resultado.get("data")}
+        if aviso_truncado:
+            doc["_aviso"] = aviso_truncado
+        return [doc]
 
     # === PDF pequeno (ate CHUNK_SIZE paginas): chamada unica (comportamento original) ===
     if total_paginas <= CHUNK_SIZE_PAGINAS:
@@ -445,11 +512,16 @@ def mapear_documentos_pdf(client, caminho, nome_arquivo):
             dados = _parse_json_response(response.content[0].text)
             docs = dados.get("documentos", [])
             if docs:
+                if aviso_truncado:
+                    docs[0]["_aviso"] = aviso_truncado
                 return docs
         except Exception:
             pass
 
-        return [{"tipo": "desconhecido", "pagina_inicio": 1, "pagina_fim": total_paginas, "data": None}]
+        doc = {"tipo": "desconhecido", "pagina_inicio": 1, "pagina_fim": total_paginas, "data": None}
+        if aviso_truncado:
+            doc["_aviso"] = aviso_truncado
+        return [doc]
 
     # === PDF grande: processa em chunks de CHUNK_SIZE_PAGINAS paginas ===
     todos_docs = []
@@ -461,9 +533,13 @@ def mapear_documentos_pdf(client, caminho, nome_arquivo):
     # Junta documentos que ficaram divididos na fronteira entre chunks
     todos_docs = _merge_boundary_docs(todos_docs)
 
-    return todos_docs if todos_docs else [
-        {"tipo": "desconhecido", "pagina_inicio": 1, "pagina_fim": total_paginas, "data": None}
-    ]
+    if not todos_docs:
+        todos_docs = [{"tipo": "desconhecido", "pagina_inicio": 1, "pagina_fim": total_paginas, "data": None}]
+
+    if aviso_truncado:
+        todos_docs[0]["_aviso"] = aviso_truncado
+
+    return todos_docs
 
 
 def analisar_texto_simples(client, texto, nome_arquivo):
@@ -538,6 +614,7 @@ def processar_arquivo_completo(client, caminho, nome_original, tmp_dir):
                 "arquivo_tmp": caminho,
                 "nome_original": nome_original,
                 "extensao": ".pdf",
+                "_aviso": doc.get("_aviso"),
             })
         else:
             # Multiplos documentos - separa em arquivos individuais
@@ -555,6 +632,7 @@ def processar_arquivo_completo(client, caminho, nome_original, tmp_dir):
                         "arquivo_tmp": novo_caminho,
                         "nome_original": f"{nome_original} (pag {p_inicio}-{p_fim})",
                         "extensao": ".pdf",
+                        "_aviso": doc.get("_aviso") if i == 0 else None,
                     })
 
     elif ext in (".jpg", ".jpeg", ".png"):
@@ -611,6 +689,9 @@ def classificar_doc(r, tipo_processo):
     """Retorna a categoria do doc para ordenacao baseada no tipo de processo."""
     tipo = limpar_nome(r.get("tipo", ""))
 
+    # Protocolo de assinatura digital
+    if "protocolo" in tipo and "assinatura" in tipo:
+        return "protocolo_assinatura"
     # Substabelecimento (separado de procuracao)
     if "substabelecimento" in tipo:
         return "substabelecimento"
@@ -769,6 +850,9 @@ def registrar_uso(usuario, nome_cliente, tipo_processo, total_docs, status):
 def processar():
     import anthropic
 
+    # Limpa ZIPs antigos (>1h) a cada request para nao entupir o disco
+    limpar_zips_antigos()
+
     api_key = os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
         return jsonify({"erro": "API key nao configurada no servidor"}), 500
@@ -822,13 +906,14 @@ def processar():
                 })
 
         # ===== ETAPA 1: Anexar protocolos de assinatura ao documento anterior =====
-        # Protocolos vem logo apos o documento assinado no PDF original
+        # Para JUDICIAL/consumidor/trabalhista/civel: protocolo anexa ao doc assinado anterior
+        # Para INSS ADMIN: protocolo vai direto pro grupo_procuracao_termos (nao anexa)
         resultados_processados = []
         protocolos_pendentes = []
 
         for r in resultados:
-            if eh_protocolo_assinatura(r):
-                # Tenta anexar ao ultimo documento assinavel
+            if eh_protocolo_assinatura(r) and tipo_processo != "inss_admin":
+                # Tenta anexar ao ultimo documento assinavel (so para judicial etc)
                 if resultados_processados:
                     ultimo = resultados_processados[-1]
                     cat_ultimo = classificar_doc(ultimo, tipo_processo)
@@ -887,7 +972,11 @@ def processar():
         # Monta ZIP
         zip_buffer = io.BytesIO()
         nome_limpo = limpar_nome(nome_cliente)
-        nome_pasta = f"{nome_limpo}_{tipo_processo}"
+        # UUID curto (8 chars) para evitar race condition entre usuarios simultaneos
+        uid = uuid.uuid4().hex[:8]
+        nome_pasta = f"{nome_limpo}_{tipo_processo}_{uid}"
+        # Nome "amigavel" para a pasta dentro do ZIP (sem o UUID, mais limpo)
+        nome_pasta_zip = f"{nome_limpo}_{tipo_processo}"
         limite_mb = LIMITES_TAMANHO.get(tipo_processo, MAX_FILE_SIZE_BYTES) // (1024 * 1024)
         relatorio_linhas = [
             f"Relatorio de Organizacao - {nome_cliente}",
@@ -898,6 +987,14 @@ def processar():
             "-" * 50,
             "",
         ]
+
+        # Adiciona avisos no topo do relatorio (ex: PDFs truncados)
+        avisos_relatorio = list({r.get("_aviso") for r in resultados if r.get("_aviso")})
+        if avisos_relatorio:
+            relatorio_linhas.insert(5, "")
+            relatorio_linhas.insert(5, "AVISOS:")
+            for a in avisos_relatorio:
+                relatorio_linhas.insert(6, f"  - {a}")
 
         lista_docs = []
         ordem = 1
@@ -920,7 +1017,7 @@ def processar():
                         for idx, parte_path in enumerate(partes):
                             sufixo = f"_parte{idx+1}" if len(partes) > 1 else ""
                             novo_nome = f"{ordem:02d}_{nome_limpo}_{nome_label}{sufixo}.pdf"
-                            zf.write(parte_path, f"{nome_pasta}/{novo_nome}")
+                            zf.write(parte_path, f"{nome_pasta_zip}/{novo_nome}")
                             relatorio_linhas.append(
                                 f"{novo_nome} | {len(docs_cat)} docs merged em ordem cronologica"
                             )
@@ -941,7 +1038,7 @@ def processar():
                         for idx, parte_path in enumerate(partes):
                             sufixo = f"_parte{idx+1}" if len(partes) > 1 else ""
                             novo_nome = f"{ordem:02d}_{nome_limpo}_{nome_label}{sufixo}{r['extensao']}"
-                            zf.write(parte_path, f"{nome_pasta}/{novo_nome}")
+                            zf.write(parte_path, f"{nome_pasta_zip}/{novo_nome}")
                             relatorio_linhas.append(
                                 f"{novo_nome} | Original: {r['nome_original']} | Data: {r.get('data', 'N/A')}"
                             )
@@ -953,7 +1050,7 @@ def processar():
                             ordem += 1
                     else:
                         novo_nome = f"{ordem:02d}_{nome_limpo}_{nome_label}{r['extensao']}"
-                        zf.write(r["arquivo_tmp"], f"{nome_pasta}/{novo_nome}")
+                        zf.write(r["arquivo_tmp"], f"{nome_pasta_zip}/{novo_nome}")
                         relatorio_linhas.append(
                             f"{novo_nome} | Original: {r['nome_original']} | Tipo: {r.get('tipo', '?')} | Data: {r.get('data', 'N/A')}"
                         )
@@ -973,7 +1070,7 @@ def processar():
                     for idx, parte_path in enumerate(partes):
                         sufixo = f"_parte{idx+1}" if len(partes) > 1 else ""
                         novo_nome = f"{ordem:02d}_{nome_limpo}_{data_str}_{tipo_limpo}{sufixo}{r['extensao']}"
-                        zf.write(parte_path, f"{nome_pasta}/{novo_nome}")
+                        zf.write(parte_path, f"{nome_pasta_zip}/{novo_nome}")
                         relatorio_linhas.append(
                             f"{novo_nome} | Original: {r['nome_original']} | Data: {r.get('data', 'NAO ENCONTRADA')}"
                         )
@@ -985,7 +1082,7 @@ def processar():
                         ordem += 1
                 else:
                     novo_nome = f"{ordem:02d}_{nome_limpo}_{data_str}_{tipo_limpo}{r['extensao']}"
-                    zf.write(r["arquivo_tmp"], f"{nome_pasta}/{novo_nome}")
+                    zf.write(r["arquivo_tmp"], f"{nome_pasta_zip}/{novo_nome}")
                     relatorio_linhas.append(
                         f"{novo_nome} | Original: {r['nome_original']} | Tipo: {r.get('tipo', '?')} | Data: {r.get('data', 'NAO ENCONTRADA')}"
                     )
@@ -999,7 +1096,7 @@ def processar():
             # Protocolos orfaos (caso nao tenham sido anexados)
             for r in protocolos_pendentes:
                 novo_nome = f"{ordem:02d}_{nome_limpo}_Protocolo_Assinatura{r['extensao']}"
-                zf.write(r["arquivo_tmp"], f"{nome_pasta}/{novo_nome}")
+                zf.write(r["arquivo_tmp"], f"{nome_pasta_zip}/{novo_nome}")
                 relatorio_linhas.append(
                     f"{novo_nome} | Original: {r['nome_original']} | PROTOCOLO ORFAO"
                 )
@@ -1012,7 +1109,7 @@ def processar():
 
             relatorio_linhas.append("")
             relatorio_linhas.append("Gerado por: Organizador Juridico AB Group")
-            zf.writestr(f"{nome_pasta}/_relatorio.txt", "\n".join(relatorio_linhas))
+            zf.writestr(f"{nome_pasta_zip}/_relatorio.txt", "\n".join(relatorio_linhas))
 
         zip_buffer.seek(0)
 
@@ -1025,6 +1122,9 @@ def processar():
         # Registra o uso na planilha (via webhook n8n)
         registrar_uso(usuario, nome_cliente, tipo_processo, len(resultados), "sucesso")
 
+        # Coleta avisos (ex: PDF truncado por ter mais que MAX_PAGINAS_PDF)
+        avisos = list({r.get("_aviso") for r in resultados if r.get("_aviso")})
+
         return jsonify({
             "sucesso": True,
             "nome_pasta": nome_pasta,
@@ -1032,6 +1132,7 @@ def processar():
             "total": len(resultados),
             "com_data": sum(1 for r in resultados if r.get("data")),
             "sem_data": sum(1 for r in resultados if not r.get("data")),
+            "avisos": avisos,
         })
 
     except Exception as e:
@@ -1046,12 +1147,29 @@ def download(nome_pasta):
     if not zip_path.exists():
         return "Arquivo nao encontrado. Processe novamente.", 404
 
+    # Remove UUID do nome do arquivo baixado (fica amigavel pro usuario)
+    # nome_pasta = "joao_silva_inss_admin_abc12345" -> download "joao_silva_inss_admin_organizado.zip"
+    nome_amigavel = nome_pasta.rsplit("_", 1)[0] if "_" in nome_pasta else nome_pasta
     return send_file(
         zip_path,
         mimetype="application/zip",
         as_attachment=True,
-        download_name=f"{nome_pasta}_organizado.zip",
+        download_name=f"{nome_amigavel}_organizado.zip",
     )
+
+
+def limpar_zips_antigos(max_idade_segundos=3600):
+    """Remove ZIPs com mais de 1 hora do diretorio compartilhado."""
+    try:
+        agora = time.time()
+        for zip_file in SHARED_ZIP_DIR.glob("*.zip"):
+            if agora - zip_file.stat().st_mtime > max_idade_segundos:
+                try:
+                    zip_file.unlink()
+                except Exception:
+                    pass
+    except Exception:
+        pass
 
 
 if __name__ == "__main__":

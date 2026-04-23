@@ -466,6 +466,10 @@
 
     <!-- RESULTADO -->
     <div class="resultado" id="resultado">
+        <div class="card" id="avisosCard" style="display:none; background:#fffaf0; border-left:4px solid #ecc94b;">
+            <div class="card-title" style="color:#b7791f;">⚠ Avisos</div>
+            <div id="listaAvisos" style="font-size:14px; color:#744210;"></div>
+        </div>
         <div class="card">
             <div class="card-title" style="color: var(--verde);">Documentos Organizados</div>
             <div class="stats">
@@ -608,6 +612,20 @@
 
         if (!usuario || !nome || !tipo || arquivos.length === 0) return;
 
+        // Aviso de tamanho antes de processar
+        const totalBytes = arquivos.reduce((soma, f) => soma + f.size, 0);
+        const totalMB = (totalBytes / (1024 * 1024)).toFixed(1);
+        if (totalBytes > 50 * 1024 * 1024) {
+            const tempoEstimado = Math.ceil(totalBytes / (1024 * 1024) / 10); // ~10MB/min estimativa
+            const ok = confirm(
+                `Voce selecionou ${arquivos.length} arquivo(s) totalizando ${totalMB}MB.\n\n` +
+                `Tempo estimado: ~${tempoEstimado} minutos.\n\n` +
+                `Arquivos grandes podem falhar. Sugerimos dividir em lotes menores.\n\n` +
+                `Continuar mesmo assim?`
+            );
+            if (!ok) return;
+        }
+
         // Mostra progresso com timer
         let segundos = 0;
         progressText.textContent = `Analisando ${arquivos.length} documento(s)...`;
@@ -653,6 +671,18 @@
             // Mostra resultado
             formulario.style.display = 'none';
             resultado.classList.add('show');
+
+            // Exibir avisos (ex: PDF truncado, limite de paginas)
+            const avisosCard = document.getElementById('avisosCard');
+            const listaAvisos = document.getElementById('listaAvisos');
+            if (data.avisos && data.avisos.length > 0) {
+                listaAvisos.innerHTML = data.avisos.map(a =>
+                    `<div style="padding:6px 0;">• ${a}</div>`
+                ).join('');
+                avisosCard.style.display = 'block';
+            } else {
+                avisosCard.style.display = 'none';
+            }
 
             document.getElementById('statTotal').textContent = data.total;
             document.getElementById('statComData').textContent = data.com_data;
