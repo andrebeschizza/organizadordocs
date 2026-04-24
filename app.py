@@ -57,6 +57,8 @@ USUARIOS = [
 
 # Webhook para registrar uso (configurado via env var)
 LOG_WEBHOOK_URL = os.environ.get("LOG_WEBHOOK_URL", "")
+# Webhook para registrar erros (pode ser o mesmo, diferenciado pelo campo 'tipo')
+ERRO_WEBHOOK_URL = os.environ.get("ERRO_WEBHOOK_URL", LOG_WEBHOOK_URL)
 
 PROMPT_MAPEAMENTO = """Analise o texto de cada pagina deste PDF juridico brasileiro.
 Identifique TODOS os documentos separados que existem dentro deste arquivo.
@@ -822,12 +824,13 @@ def index():
 
 
 def registrar_uso(usuario, nome_cliente, tipo_processo, total_docs, status):
-    """Envia log de uso para webhook (n8n -> Google Sheets)."""
+    """Envia log de uso para webhook (n8n -> Google Sheets aba 'Uso')."""
     if not LOG_WEBHOOK_URL:
         return
     try:
         import urllib.request
         payload = json.dumps({
+            "tipo": "uso",
             "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "usuario": usuario,
             "cliente": nome_cliente,
@@ -837,6 +840,35 @@ def registrar_uso(usuario, nome_cliente, tipo_processo, total_docs, status):
         }).encode("utf-8")
         req = urllib.request.Request(
             LOG_WEBHOOK_URL,
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        urllib.request.urlopen(req, timeout=5)
+    except Exception:
+        pass  # nao quebra o app se o log falhar
+
+
+def registrar_erro(usuario, nome_cliente, tipo_processo, arquivo, tipo_erro, mensagem):
+    """Envia log de erro para webhook (n8n -> Google Sheets aba 'Erros').
+    Usado quando algo da errado: exception, classificacao falhou, PDF truncado, etc.
+    """
+    if not ERRO_WEBHOOK_URL:
+        return
+    try:
+        import urllib.request
+        payload = json.dumps({
+            "tipo": "erro",
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "usuario": usuario or "desconhecido",
+            "cliente": nome_cliente or "",
+            "tipo_processo": TIPOS_PROCESSO.get(tipo_processo, tipo_processo or ""),
+            "arquivo": arquivo or "",
+            "tipo_erro": tipo_erro,  # ex: "excecao_processamento", "pdf_truncado", "api_anthropic"
+            "mensagem": str(mensagem)[:500],  # trunca mensagens longas
+        }).encode("utf-8")
+        req = urllib.request.Request(
+            ERRO_WEBHOOK_URL,
             data=payload,
             headers={"Content-Type": "application/json"},
             method="POST",
@@ -895,7 +927,7 @@ def processar():
                 # Processa e separa documentos automaticamente
                 docs_separados = processar_arquivo_completo(client, tmp_path, nome_original, tmp_dir)
                 resultados.extend(docs_separados)
-            except Exception:
+            except Exception as e:
                 # Nao falha o request inteiro — adiciona como documento desconhecido
                 resultados.append({
                     "tipo": "desconhecido",
@@ -904,6 +936,8 @@ def processar():
                     "nome_original": nome_original,
                     "extensao": ext,
                 })
+                registrar_erro(usuario, nome_cliente, tipo_processo, nome_original,
+                              "excecao_processamento_arquivo", e)
 
         # ===== ETAPA 1: Anexar protocolos de assinatura ao documento anterior =====
         # Para JUDICIAL/consumidor/trabalhista/civel: protocolo anexa ao doc assinado anterior
@@ -1125,6 +1159,18 @@ def processar():
         # Coleta avisos (ex: PDF truncado por ter mais que MAX_PAGINAS_PDF)
         avisos = list({r.get("_aviso") for r in resultados if r.get("_aviso")})
 
+        # Registra avisos como eventos de erro menores (pra monitoramento)
+        for aviso in avisos:
+            registrar_erro(usuario, nome_cliente, tipo_processo, "",
+                          "pdf_truncado", aviso)
+
+        # Registra se muitos documentos sairam como desconhecido (qualidade ruim)
+        total_desconhecidos = sum(1 for r in resultados if r.get("tipo", "").lower() == "desconhecido")
+        if total_desconhecidos > 0 and total_desconhecidos >= len(resultados) * 0.3:
+            registrar_erro(usuario, nome_cliente, tipo_processo, "",
+                          "muitos_desconhecidos",
+                          f"{total_desconhecidos} de {len(resultados)} documentos nao foram classificados")
+
         return jsonify({
             "sucesso": True,
             "nome_pasta": nome_pasta,
@@ -1138,6 +1184,8 @@ def processar():
     except Exception as e:
         shutil.rmtree(tmp_dir, ignore_errors=True)
         registrar_uso(usuario, nome_cliente, tipo_processo, 0, f"erro: {str(e)[:100]}")
+        registrar_erro(usuario, nome_cliente, tipo_processo, "",
+                      "excecao_geral_processar", e)
         return jsonify({"erro": str(e)}), 500
 
 
