@@ -460,7 +460,11 @@
         <div class="progress-box">
             <div class="spinner"></div>
             <div class="progress-text" id="progressText">Analisando documentos...</div>
-            <div class="progress-hint">A IA esta lendo cada documento</div>
+            <div class="progress-hint" id="progressHint">A IA esta lendo cada documento</div>
+            <div style="margin-top: 20px; background: var(--cinza-borda); border-radius: 999px; overflow: hidden; height: 8px;">
+                <div id="progressBar" style="height: 100%; background: linear-gradient(90deg, var(--azul), var(--verde)); width: 0%; transition: width 0.4s ease;"></div>
+            </div>
+            <div id="progressPercent" style="font-size: 12px; color: #a0aec0; margin-top: 8px;">0%</div>
         </div>
     </div>
 
@@ -603,7 +607,60 @@
         document.getElementById('usuario').value = usuarioSalvo;
     }
 
-    // Enviar
+    // Mostra resultado final (chamado apos "complete" do stream)
+    function mostrarResultado(data) {
+        formulario.style.display = 'none';
+        resultado.classList.add('show');
+
+        const avisosCard = document.getElementById('avisosCard');
+        const listaAvisos = document.getElementById('listaAvisos');
+        if (data.avisos && data.avisos.length > 0) {
+            listaAvisos.innerHTML = data.avisos.map(a =>
+                `<div style="padding:6px 0;">• ${a}</div>`
+            ).join('');
+            avisosCard.style.display = 'block';
+        } else {
+            avisosCard.style.display = 'none';
+        }
+
+        document.getElementById('statTotal').textContent = data.total;
+        document.getElementById('statComData').textContent = data.com_data;
+        document.getElementById('statSemData').textContent = data.sem_data;
+
+        const lista = document.getElementById('listaResultado');
+        lista.innerHTML = '';
+        data.documentos.forEach(doc => {
+            const div = document.createElement('div');
+            div.className = 'doc-resultado';
+            const ordemClass = doc.data ? '' : ' sem-data';
+            const dataTexto = doc.data
+                ? new Date(doc.data + 'T12:00:00').toLocaleDateString('pt-BR')
+                : 'Sem data';
+            const fonteTxt = (doc.data_fonte && doc.data_fonte !== 'ia')
+                ? ` <span style="font-size:10px; color:#a0aec0;">(fonte: ${doc.data_fonte})</span>`
+                : '';
+            div.innerHTML = `
+                <div class="ordem${ordemClass}">${doc.ordem}</div>
+                <div class="info">
+                    <div class="tipo">${doc.tipo}</div>
+                    <div class="data">${dataTexto}${fonteTxt}</div>
+                    <div class="original">${doc.original}</div>
+                </div>
+            `;
+            lista.appendChild(div);
+        });
+
+        document.getElementById('btnDownload').href = `/download/${data.nome_pasta}`;
+    }
+
+    // Atualiza barra de progresso
+    function atualizarProgresso(etapa, percent) {
+        progressText.textContent = etapa || 'Processando...';
+        document.getElementById('progressBar').style.width = `${percent || 0}%`;
+        document.getElementById('progressPercent').textContent = `${Math.round(percent || 0)}%`;
+    }
+
+    // Enviar com STREAMING (SSE)
     btnOrganizar.addEventListener('click', async () => {
         erro.classList.remove('show');
         const usuario = document.getElementById('usuario').value;
@@ -616,7 +673,7 @@
         const totalBytes = arquivos.reduce((soma, f) => soma + f.size, 0);
         const totalMB = (totalBytes / (1024 * 1024)).toFixed(1);
         if (totalBytes > 50 * 1024 * 1024) {
-            const tempoEstimado = Math.ceil(totalBytes / (1024 * 1024) / 10); // ~10MB/min estimativa
+            const tempoEstimado = Math.ceil(totalBytes / (1024 * 1024) / 10);
             const ok = confirm(
                 `Voce selecionou ${arquivos.length} arquivo(s) totalizando ${totalMB}MB.\n\n` +
                 `Tempo estimado: ~${tempoEstimado} minutos.\n\n` +
@@ -626,19 +683,10 @@
             if (!ok) return;
         }
 
-        // Mostra progresso com timer
-        let segundos = 0;
-        progressText.textContent = `Analisando ${arquivos.length} documento(s)...`;
-        document.querySelector('.progress-hint').textContent = 'A IA esta lendo cada documento';
+        // Reseta e mostra overlay de progresso
+        atualizarProgresso(`Enviando ${arquivos.length} documento(s)...`, 0);
+        document.getElementById('progressHint').textContent = 'Conectando ao servidor...';
         progresso.classList.add('show');
-
-        const timer = setInterval(() => {
-            segundos++;
-            if (segundos >= 15) {
-                document.querySelector('.progress-hint').textContent =
-                    `Processando... ${segundos}s (pode levar ate 3 minutos)`;
-            }
-        }, 1000);
 
         const formData = new FormData();
         formData.append('usuario', usuario);
@@ -646,78 +694,81 @@
         formData.append('tipo_processo', tipo);
         arquivos.forEach(f => formData.append('documentos', f));
 
-        // Timeout de 5 minutos para processos grandes
         const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 300000);
+        const timeoutId = setTimeout(() => controller.abort(), 600000); // 10 min
 
         try {
-            const resp = await fetch('/processar', {
+            const resp = await fetch('/processar-stream', {
                 method: 'POST',
                 body: formData,
                 signal: controller.signal,
             });
-            clearTimeout(timeoutId);
-            clearInterval(timer);
-            const data = await resp.json();
 
-            progresso.classList.remove('show');
+            if (!resp.ok) {
+                // Erro antes do stream (ex: validacao 400)
+                const err = await resp.json().catch(() => ({erro: 'Erro no servidor'}));
+                throw new Error(err.erro || `HTTP ${resp.status}`);
+            }
 
-            if (data.erro) {
-                erro.textContent = data.erro;
+            // Le o stream linha por linha (formato SSE: "data: {...}\n\n")
+            const reader = resp.body.getReader();
+            const decoder = new TextDecoder();
+            let buffer = '';
+            let completo = false;
+
+            while (true) {
+                const {value, done} = await reader.read();
+                if (done) break;
+                buffer += decoder.decode(value, {stream: true});
+
+                // Processa eventos completos (separados por \n\n)
+                let sepIdx;
+                while ((sepIdx = buffer.indexOf('\n\n')) >= 0) {
+                    const rawEvent = buffer.slice(0, sepIdx);
+                    buffer = buffer.slice(sepIdx + 2);
+                    // Formato SSE: "data: {json}"
+                    const dataLine = rawEvent.split('\n').find(l => l.startsWith('data: '));
+                    if (!dataLine) continue;
+                    try {
+                        const evento = JSON.parse(dataLine.slice(6));
+                        if (evento.tipo === 'progresso') {
+                            atualizarProgresso(evento.etapa, evento.percent);
+                            document.getElementById('progressHint').textContent =
+                                'A IA esta analisando seus documentos...';
+                        } else if (evento.tipo === 'complete') {
+                            atualizarProgresso('Concluido!', 100);
+                            completo = true;
+                            clearTimeout(timeoutId);
+                            setTimeout(() => {
+                                progresso.classList.remove('show');
+                                mostrarResultado(evento.resultado);
+                            }, 500);
+                        } else if (evento.tipo === 'error') {
+                            clearTimeout(timeoutId);
+                            progresso.classList.remove('show');
+                            erro.textContent = evento.mensagem || 'Erro no processamento';
+                            erro.classList.add('show');
+                            return;
+                        }
+                    } catch (e) {
+                        console.warn('evento invalido:', rawEvent, e);
+                    }
+                }
+            }
+
+            if (!completo) {
+                clearTimeout(timeoutId);
+                progresso.classList.remove('show');
+                erro.textContent = 'Conexao encerrada antes do fim. Tente novamente.';
                 erro.classList.add('show');
-                return;
             }
-
-            // Mostra resultado
-            formulario.style.display = 'none';
-            resultado.classList.add('show');
-
-            // Exibir avisos (ex: PDF truncado, limite de paginas)
-            const avisosCard = document.getElementById('avisosCard');
-            const listaAvisos = document.getElementById('listaAvisos');
-            if (data.avisos && data.avisos.length > 0) {
-                listaAvisos.innerHTML = data.avisos.map(a =>
-                    `<div style="padding:6px 0;">• ${a}</div>`
-                ).join('');
-                avisosCard.style.display = 'block';
-            } else {
-                avisosCard.style.display = 'none';
-            }
-
-            document.getElementById('statTotal').textContent = data.total;
-            document.getElementById('statComData').textContent = data.com_data;
-            document.getElementById('statSemData').textContent = data.sem_data;
-
-            const lista = document.getElementById('listaResultado');
-            lista.innerHTML = '';
-            data.documentos.forEach(doc => {
-                const div = document.createElement('div');
-                div.className = 'doc-resultado';
-                const ordemClass = doc.data ? '' : ' sem-data';
-                const dataTexto = doc.data
-                    ? new Date(doc.data + 'T12:00:00').toLocaleDateString('pt-BR')
-                    : 'Sem data';
-                div.innerHTML = `
-                    <div class="ordem${ordemClass}">${doc.ordem}</div>
-                    <div class="info">
-                        <div class="tipo">${doc.tipo}</div>
-                        <div class="data">${dataTexto}</div>
-                        <div class="original">${doc.original}</div>
-                    </div>
-                `;
-                lista.appendChild(div);
-            });
-
-            document.getElementById('btnDownload').href = `/download/${data.nome_pasta}`;
-
         } catch (e) {
             clearTimeout(timeoutId);
-            clearInterval(timer);
             progresso.classList.remove('show');
             if (e.name === 'AbortError') {
                 erro.textContent = 'Tempo esgotado. Tente com menos documentos ou arquivos menores.';
             } else {
-                erro.textContent = 'Erro de conexao. Tente novamente.';
+                erro.textContent = e.message || 'Erro de conexao. Tente novamente.';
             }
             erro.classList.add('show');
         }

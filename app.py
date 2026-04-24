@@ -19,7 +19,7 @@ import unicodedata
 from pathlib import Path
 from datetime import datetime
 
-from flask import Flask, render_template, request, jsonify, send_file
+from flask import Flask, render_template, request, jsonify, send_file, Response, stream_with_context
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 100 * 1024 * 1024  # 100MB max total
@@ -1292,6 +1292,322 @@ def processar():
         registrar_erro(usuario, nome_cliente, tipo_processo, "",
                       "excecao_geral_processar", e)
         return jsonify({"erro": str(e)}), 500
+
+
+def _sse(evento):
+    """Formata um dicionario como evento SSE."""
+    return f"data: {json.dumps(evento)}\n\n"
+
+
+@app.route("/processar-stream", methods=["POST"])
+def processar_stream():
+    """Versao streaming do /processar. Envia eventos SSE de progresso em tempo real.
+    Eventos:
+      - {"tipo": "progresso", "etapa": "...", "percent": 0-100}
+      - {"tipo": "complete", "resultado": {...mesma payload do /processar}}
+      - {"tipo": "error", "mensagem": "..."}
+    """
+    import anthropic
+
+    limpar_zips_antigos()
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        return jsonify({"erro": "API key nao configurada no servidor"}), 500
+
+    usuario = request.form.get("usuario", "").strip()
+    nome_cliente = request.form.get("nome_cliente", "").strip()
+    tipo_processo = request.form.get("tipo_processo", "").strip()
+
+    if not usuario or usuario not in USUARIOS:
+        return jsonify({"erro": "Selecione o usuario que esta processando"}), 400
+    if not nome_cliente:
+        return jsonify({"erro": "Nome do cliente e obrigatorio"}), 400
+    if tipo_processo not in TIPOS_PROCESSO:
+        return jsonify({"erro": "Tipo de processo invalido"}), 400
+
+    arquivos = request.files.getlist("documentos")
+    if not arquivos or all(f.filename == "" for f in arquivos):
+        return jsonify({"erro": "Nenhum documento enviado"}), 400
+
+    arquivos_validos = [
+        f for f in arquivos
+        if f.filename and Path(f.filename).suffix.lower() in EXTENSOES_ACEITAS
+    ]
+    if not arquivos_validos:
+        return jsonify({"erro": f"Nenhum arquivo valido. Aceitos: {', '.join(EXTENSOES_ACEITAS)}"}), 400
+
+    tmp_dir = tempfile.mkdtemp()
+
+    # Salva arquivos em disco antes de iniciar stream (request nao da pra ler dentro do generator)
+    arquivos_para_processar = []
+    for arquivo in arquivos_validos:
+        nome_original = arquivo.filename
+        ext = Path(nome_original).suffix.lower()
+        tmp_path = os.path.join(tmp_dir, nome_original)
+        arquivo.save(tmp_path)
+        arquivos_para_processar.append((nome_original, tmp_path, ext))
+
+    @stream_with_context
+    def gerar():
+        try:
+            yield _sse({"tipo": "progresso", "etapa": "Iniciando processamento...", "percent": 2})
+
+            client = anthropic.Anthropic(api_key=api_key)
+            resultados = []
+            total = len(arquivos_para_processar)
+
+            # ===== ETAPA: ANALISE DE CADA ARQUIVO =====
+            for i, (nome_original, tmp_path, ext) in enumerate(arquivos_para_processar):
+                pct = 5 + int((i / total) * 55)  # 5% a 60%
+                yield _sse({
+                    "tipo": "progresso",
+                    "etapa": f"Analisando arquivo {i+1} de {total}: {nome_original}",
+                    "percent": pct,
+                })
+                try:
+                    docs_separados = processar_arquivo_completo(client, tmp_path, nome_original, tmp_dir)
+                    for doc in docs_separados:
+                        resolver_data_fallback(doc, tmp_path, nome_original)
+                    resultados.extend(docs_separados)
+                except Exception as e:
+                    resultados.append({
+                        "tipo": "desconhecido", "data": None,
+                        "arquivo_tmp": tmp_path, "nome_original": nome_original,
+                        "extensao": ext, "_data_fonte": None,
+                    })
+                    registrar_erro(usuario, nome_cliente, tipo_processo, nome_original,
+                                  "excecao_processamento_arquivo", e)
+
+            # ===== ETAPA 1: Anexar protocolos =====
+            yield _sse({"tipo": "progresso", "etapa": "Agrupando protocolos de assinatura...", "percent": 65})
+            resultados_processados = []
+            protocolos_pendentes = []
+            for r in resultados:
+                if eh_protocolo_assinatura(r) and tipo_processo != "inss_admin":
+                    if resultados_processados:
+                        ultimo = resultados_processados[-1]
+                        cat_ultimo = classificar_doc(ultimo, tipo_processo)
+                        if cat_ultimo in CATEGORIAS_ASSINADAS:
+                            merged_path = os.path.join(tmp_dir, f"merged_{len(resultados_processados)}.pdf")
+                            if merge_pdfs([ultimo["arquivo_tmp"], r["arquivo_tmp"]], merged_path):
+                                ultimo["arquivo_tmp"] = merged_path
+                                ultimo["nome_original"] += " + protocolo"
+                                continue
+                    protocolos_pendentes.append(r)
+                else:
+                    resultados_processados.append(r)
+
+            # ===== ETAPA 2: Classificar =====
+            yield _sse({"tipo": "progresso", "etapa": "Classificando documentos...", "percent": 75})
+            sequencia = SEQUENCIA_JUDICIAL if tipo_processo != "inss_admin" else SEQUENCIA_INSS_ADMIN
+            categorias_validas = [cat for cat, _ in sequencia]
+            if tipo_processo == "inss_admin":
+                for grupo, componentes in GRUPO_MERGE_ADMIN.items():
+                    categorias_validas.extend(componentes)
+            docs_por_categoria = {cat: [] for cat in categorias_validas}
+            docs_cronologicos = []
+            for r in resultados_processados:
+                cat = classificar_doc(r, tipo_processo)
+                if cat and cat in docs_por_categoria:
+                    docs_por_categoria[cat].append(r)
+                else:
+                    docs_cronologicos.append(r)
+
+            # ETAPA 2.5: admin grouping
+            if tipo_processo == "inss_admin":
+                for grupo, componentes in GRUPO_MERGE_ADMIN.items():
+                    grupo_docs = []
+                    for comp in componentes:
+                        grupo_docs.extend(docs_por_categoria.pop(comp, []))
+                    if grupo_docs:
+                        ordem_componentes = {c: i for i, c in enumerate(componentes)}
+                        grupo_docs.sort(key=lambda r: ordem_componentes.get(
+                            classificar_doc(r, tipo_processo), 99))
+                        docs_por_categoria[grupo] = grupo_docs
+
+            docs_cronologicos.sort(key=lambda r: r.get("data") or "9999-99-99")
+            for cat in CATEGORIAS_MERGE:
+                if cat in docs_por_categoria and cat not in GRUPO_MERGE_ADMIN:
+                    docs_por_categoria[cat].sort(key=lambda r: r.get("data") or "9999-99-99")
+
+            # ===== ETAPA 3: Montar ZIP =====
+            yield _sse({"tipo": "progresso", "etapa": "Gerando arquivo ZIP...", "percent": 85})
+            zip_buffer = io.BytesIO()
+            nome_limpo = limpar_nome(nome_cliente)
+            uid = uuid.uuid4().hex[:8]
+            nome_pasta = f"{nome_limpo}_{tipo_processo}_{uid}"
+            nome_pasta_zip = f"{nome_limpo}_{tipo_processo}"
+            limite_mb = LIMITES_TAMANHO.get(tipo_processo, MAX_FILE_SIZE_BYTES) // (1024 * 1024)
+            relatorio_linhas = [
+                f"Relatorio de Organizacao - {nome_cliente}",
+                f"Tipo: {TIPOS_PROCESSO[tipo_processo]}",
+                f"Data: {datetime.now().strftime('%Y-%m-%d %H:%M')}",
+                f"Total de documentos separados: {len(resultados_processados)}",
+                f"Limite por arquivo: {limite_mb}MB",
+                "-" * 50, "",
+            ]
+            avisos_relatorio = list({r.get("_aviso") for r in resultados if r.get("_aviso")})
+            if avisos_relatorio:
+                relatorio_linhas.insert(5, "")
+                relatorio_linhas.insert(5, "AVISOS:")
+                for a in avisos_relatorio:
+                    relatorio_linhas.insert(6, f"  - {a}")
+
+            lista_docs = []
+            ordem = 1
+            limite_arquivo = LIMITES_TAMANHO.get(tipo_processo, MAX_FILE_SIZE_BYTES)
+
+            with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+                for cat, label in sequencia:
+                    docs_cat = docs_por_categoria.get(cat, [])
+                    if not docs_cat:
+                        continue
+                    if cat in CATEGORIAS_MERGE and len(docs_cat) > 1:
+                        merged_path = os.path.join(tmp_dir, f"merged_{cat}.pdf")
+                        caminhos = [r["arquivo_tmp"] for r in docs_cat]
+                        if merge_pdfs(caminhos, merged_path):
+                            nome_label = label or limpar_nome(docs_cat[0].get("tipo", "documento"))[:30].upper()
+                            partes = dividir_pdf_por_tamanho(merged_path, tmp_dir, max_bytes=limite_arquivo)
+                            for idx, parte_path in enumerate(partes):
+                                sufixo = f"_parte{idx+1}" if len(partes) > 1 else ""
+                                novo_nome = f"{ordem:02d}_{nome_limpo}_{nome_label}{sufixo}.pdf"
+                                zf.write(parte_path, f"{nome_pasta_zip}/{novo_nome}")
+                                relatorio_linhas.append(f"{novo_nome} | {len(docs_cat)} docs merged")
+                                lista_docs.append({
+                                    "ordem": ordem, "nome": novo_nome,
+                                    "original": f"{len(docs_cat)} documentos merged",
+                                    "tipo": label or cat, "data": None,
+                                })
+                                ordem += 1
+                            continue
+                    for r in docs_cat:
+                        nome_label = label or limpar_nome(r.get("tipo", "documento"))[:30].upper()
+                        if r["extensao"] == ".pdf" and os.path.getsize(r["arquivo_tmp"]) > limite_arquivo:
+                            partes = dividir_pdf_por_tamanho(r["arquivo_tmp"], tmp_dir, max_bytes=limite_arquivo)
+                            for idx, parte_path in enumerate(partes):
+                                sufixo = f"_parte{idx+1}" if len(partes) > 1 else ""
+                                novo_nome = f"{ordem:02d}_{nome_limpo}_{nome_label}{sufixo}{r['extensao']}"
+                                zf.write(parte_path, f"{nome_pasta_zip}/{novo_nome}")
+                                fonte = r.get("_data_fonte")
+                                fonte_txt = f" [fonte: {fonte}]" if fonte and fonte != "ia" else ""
+                                relatorio_linhas.append(
+                                    f"{novo_nome} | Original: {r['nome_original']} | Data: {r.get('data', 'N/A')}{fonte_txt}"
+                                )
+                                lista_docs.append({
+                                    "ordem": ordem, "nome": novo_nome,
+                                    "original": r["nome_original"],
+                                    "tipo": r.get("tipo", "?"), "data": r.get("data"),
+                                    "data_fonte": r.get("_data_fonte"),
+                                })
+                                ordem += 1
+                        else:
+                            novo_nome = f"{ordem:02d}_{nome_limpo}_{nome_label}{r['extensao']}"
+                            zf.write(r["arquivo_tmp"], f"{nome_pasta_zip}/{novo_nome}")
+                            fonte = r.get("_data_fonte")
+                            fonte_txt = f" [fonte: {fonte}]" if fonte and fonte != "ia" else ""
+                            relatorio_linhas.append(
+                                f"{novo_nome} | Original: {r['nome_original']} | Tipo: {r.get('tipo', '?')} | Data: {r.get('data', 'N/A')}{fonte_txt}"
+                            )
+                            lista_docs.append({
+                                "ordem": ordem, "nome": novo_nome,
+                                "original": r["nome_original"],
+                                "tipo": r.get("tipo", "?"), "data": r.get("data"),
+                                "data_fonte": r.get("_data_fonte"),
+                            })
+                            ordem += 1
+
+                for r in docs_cronologicos:
+                    tipo_limpo = limpar_nome(r.get("tipo", "documento"))[:30]
+                    data_str = r.get("data") or "sem_data"
+                    if r["extensao"] == ".pdf" and os.path.getsize(r["arquivo_tmp"]) > limite_arquivo:
+                        partes = dividir_pdf_por_tamanho(r["arquivo_tmp"], tmp_dir, max_bytes=limite_arquivo)
+                        for idx, parte_path in enumerate(partes):
+                            sufixo = f"_parte{idx+1}" if len(partes) > 1 else ""
+                            novo_nome = f"{ordem:02d}_{nome_limpo}_{data_str}_{tipo_limpo}{sufixo}{r['extensao']}"
+                            zf.write(parte_path, f"{nome_pasta_zip}/{novo_nome}")
+                            fonte = r.get("_data_fonte")
+                            fonte_txt = f" [fonte: {fonte}]" if fonte and fonte != "ia" else ""
+                            relatorio_linhas.append(
+                                f"{novo_nome} | Original: {r['nome_original']} | Data: {r.get('data', 'NAO ENCONTRADA')}{fonte_txt}"
+                            )
+                            lista_docs.append({
+                                "ordem": ordem, "nome": novo_nome,
+                                "original": r["nome_original"],
+                                "tipo": r.get("tipo", "?"), "data": r.get("data"),
+                                "data_fonte": r.get("_data_fonte"),
+                            })
+                            ordem += 1
+                    else:
+                        novo_nome = f"{ordem:02d}_{nome_limpo}_{data_str}_{tipo_limpo}{r['extensao']}"
+                        zf.write(r["arquivo_tmp"], f"{nome_pasta_zip}/{novo_nome}")
+                        fonte = r.get("_data_fonte")
+                        fonte_txt = f" [fonte: {fonte}]" if fonte and fonte != "ia" else ""
+                        relatorio_linhas.append(
+                            f"{novo_nome} | Original: {r['nome_original']} | Tipo: {r.get('tipo', '?')} | Data: {r.get('data', 'NAO ENCONTRADA')}{fonte_txt}"
+                        )
+                        lista_docs.append({
+                            "ordem": ordem, "nome": novo_nome,
+                            "original": r["nome_original"],
+                            "tipo": r.get("tipo", "?"), "data": r.get("data"),
+                            "data_fonte": r.get("_data_fonte"),
+                        })
+                        ordem += 1
+
+                for r in protocolos_pendentes:
+                    novo_nome = f"{ordem:02d}_{nome_limpo}_Protocolo_Assinatura{r['extensao']}"
+                    zf.write(r["arquivo_tmp"], f"{nome_pasta_zip}/{novo_nome}")
+                    relatorio_linhas.append(f"{novo_nome} | PROTOCOLO ORFAO")
+                    lista_docs.append({
+                        "ordem": ordem, "nome": novo_nome,
+                        "original": r["nome_original"],
+                        "tipo": "Protocolo Assinatura", "data": None,
+                    })
+                    ordem += 1
+
+                relatorio_linhas.append("")
+                relatorio_linhas.append("Gerado por: Organizador Juridico AB Group")
+                zf.writestr(f"{nome_pasta_zip}/_relatorio.txt", "\n".join(relatorio_linhas))
+
+            # ===== ETAPA 4: Salvar e registrar =====
+            yield _sse({"tipo": "progresso", "etapa": "Finalizando...", "percent": 95})
+            zip_buffer.seek(0)
+            shared_zip = SHARED_ZIP_DIR / f"{nome_pasta}.zip"
+            with open(shared_zip, "wb") as f:
+                f.write(zip_buffer.getvalue())
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
+            registrar_uso(usuario, nome_cliente, tipo_processo, len(resultados), "sucesso")
+            avisos = list({r.get("_aviso") for r in resultados if r.get("_aviso")})
+            for aviso in avisos:
+                registrar_erro(usuario, nome_cliente, tipo_processo, "", "pdf_truncado", aviso)
+            total_desconhecidos = sum(1 for r in resultados if r.get("tipo", "").lower() == "desconhecido")
+            if total_desconhecidos > 0 and total_desconhecidos >= len(resultados) * 0.3:
+                registrar_erro(usuario, nome_cliente, tipo_processo, "", "muitos_desconhecidos",
+                              f"{total_desconhecidos} de {len(resultados)} documentos nao classificados")
+
+            yield _sse({
+                "tipo": "complete",
+                "resultado": {
+                    "sucesso": True,
+                    "nome_pasta": nome_pasta,
+                    "documentos": lista_docs,
+                    "total": len(resultados),
+                    "com_data": sum(1 for r in resultados if r.get("data")),
+                    "sem_data": sum(1 for r in resultados if not r.get("data")),
+                    "avisos": avisos,
+                }
+            })
+
+        except Exception as e:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+            registrar_uso(usuario, nome_cliente, tipo_processo, 0, f"erro: {str(e)[:100]}")
+            registrar_erro(usuario, nome_cliente, tipo_processo, "", "excecao_geral_processar", e)
+            yield _sse({"tipo": "error", "mensagem": str(e)})
+
+    return Response(gerar(), mimetype='text/event-stream', headers={
+        'X-Accel-Buffering': 'no',
+        'Cache-Control': 'no-cache',
+    })
 
 
 @app.route("/download/<nome_pasta>")
