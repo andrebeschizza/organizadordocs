@@ -56,10 +56,8 @@ USUARIOS = [
     "Camila", "Luana", "Claudio", "Meire", "André", "Vitória",
 ]
 
-# Webhook para registrar uso (configurado via env var)
+# Webhook para registrar uso e erros (mesma planilha, diferenciado pelo prefixo no status)
 LOG_WEBHOOK_URL = os.environ.get("LOG_WEBHOOK_URL", "")
-# Webhook para registrar erros (pode ser o mesmo, diferenciado pelo campo 'tipo')
-ERRO_WEBHOOK_URL = os.environ.get("ERRO_WEBHOOK_URL", LOG_WEBHOOK_URL)
 
 PROMPT_MAPEAMENTO = """Analise o texto de cada pagina deste PDF juridico brasileiro.
 Identifique TODOS os documentos separados que existem dentro deste arquivo.
@@ -919,17 +917,18 @@ def index():
 
 
 def registrar_uso(usuario, nome_cliente, tipo_processo, total_docs, status):
-    """Envia log de uso para webhook (n8n -> Google Sheets aba 'Uso')."""
+    """Envia log de uso/erro para webhook (n8n -> Google Sheets).
+    Erros sao diferenciados pelo prefixo 'ERRO[tipo_erro]' no campo status.
+    """
     if not LOG_WEBHOOK_URL:
         return
     try:
         import urllib.request
         payload = json.dumps({
-            "tipo": "uso",
             "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "usuario": usuario,
-            "cliente": nome_cliente,
-            "tipo_processo": TIPOS_PROCESSO.get(tipo_processo, tipo_processo),
+            "usuario": usuario or "desconhecido",
+            "cliente": nome_cliente or "",
+            "tipo_processo": TIPOS_PROCESSO.get(tipo_processo, tipo_processo or ""),
             "total_documentos": str(total_docs),
             "status": status,
         }).encode("utf-8")
@@ -945,32 +944,15 @@ def registrar_uso(usuario, nome_cliente, tipo_processo, total_docs, status):
 
 
 def registrar_erro(usuario, nome_cliente, tipo_processo, arquivo, tipo_erro, mensagem):
-    """Envia log de erro para webhook (n8n -> Google Sheets aba 'Erros').
-    Usado quando algo da errado: exception, classificacao falhou, PDF truncado, etc.
+    """Registra um erro na MESMA planilha de uso, com prefixo ERRO[tipo_erro].
+    Assim nao precisa de aba separada nem workflow diferente no n8n - o Andre
+    pode filtrar por 'status CONTEM ERRO[' pra ver so os erros.
     """
-    if not ERRO_WEBHOOK_URL:
-        return
-    try:
-        import urllib.request
-        payload = json.dumps({
-            "tipo": "erro",
-            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "usuario": usuario or "desconhecido",
-            "cliente": nome_cliente or "",
-            "tipo_processo": TIPOS_PROCESSO.get(tipo_processo, tipo_processo or ""),
-            "arquivo": arquivo or "",
-            "tipo_erro": tipo_erro,  # ex: "excecao_processamento", "pdf_truncado", "api_anthropic"
-            "mensagem": str(mensagem)[:500],  # trunca mensagens longas
-        }).encode("utf-8")
-        req = urllib.request.Request(
-            ERRO_WEBHOOK_URL,
-            data=payload,
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        urllib.request.urlopen(req, timeout=5)
-    except Exception:
-        pass  # nao quebra o app se o log falhar
+    msg_limpa = str(mensagem)[:200].replace("\n", " ").replace("|", "/")
+    arq = arquivo or "-"
+    status_codificado = f"ERRO[{tipo_erro}] {arq}: {msg_limpa}"
+    # Usa a mesma funcao registrar_uso — cai na mesma aba, mesmo formato
+    registrar_uso(usuario, nome_cliente, tipo_processo, 0, status_codificado)
 
 
 @app.route("/processar", methods=["POST"])
