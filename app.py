@@ -28,6 +28,12 @@ app.config["MAX_CONTENT_LENGTH"] = 100 * 1024 * 1024  # 100MB max total
 SHARED_ZIP_DIR = Path(tempfile.gettempdir()) / "organizador-zips"
 SHARED_ZIP_DIR.mkdir(exist_ok=True)
 
+# Diretorio para sessoes de revisao manual (#2.2)
+# Cada sessao contem os arquivos processados + metadata.json
+# Permite usuario revisar/editar a classificacao antes de gerar o ZIP final
+SESSIONS_DIR = Path(tempfile.gettempdir()) / "organizador-sessions"
+SESSIONS_DIR.mkdir(exist_ok=True)
+
 MODELO_IA = "claude-haiku-4-5-20251001"
 EXTENSOES_ACEITAS = {".pdf", ".jpg", ".jpeg", ".png", ".docx"}
 MAX_TEXTO_POR_PAGINA = 2000  # contexto maior para IA classificar melhor
@@ -1635,6 +1641,22 @@ def processar_stream():
             shared_zip = SHARED_ZIP_DIR / f"{nome_pasta}.zip"
             with open(shared_zip, "wb") as f:
                 f.write(zip_buffer.getvalue())
+
+            # Salva sessao de revisao (#2.2): usuario pode editar tipos/datas e gerar ZIP novamente
+            limpar_sessoes_antigas()
+            session_id = uuid.uuid4().hex
+            # docs_para_sessao = todos os docs antes do merge (flat) pra permitir edicao individual
+            docs_para_sessao = list(resultados_processados) + list(protocolos_pendentes)
+            contexto_sessao = {
+                "usuario": usuario,
+                "nome_cliente": nome_cliente,
+                "tipo_processo": tipo_processo,
+            }
+            try:
+                salvar_sessao(session_id, contexto_sessao, docs_para_sessao)
+            except Exception:
+                session_id = None  # se falhar, frontend cai no fluxo direto
+
             shutil.rmtree(tmp_dir, ignore_errors=True)
 
             registrar_uso(usuario, nome_cliente, tipo_processo, len(resultados), "sucesso")
@@ -1646,12 +1668,21 @@ def processar_stream():
                 registrar_erro(usuario, nome_cliente, tipo_processo, "", "muitos_desconhecidos",
                               f"{total_desconhecidos} de {len(resultados)} documentos nao classificados")
 
+            # Preparar lista de docs brutos pra revisao (usando dados da sessao)
+            docs_revisao = []
+            if session_id:
+                sess = ler_sessao(session_id)
+                if sess:
+                    docs_revisao = sess["docs"]
+
             yield _sse({
                 "tipo": "complete",
                 "resultado": {
                     "sucesso": True,
                     "nome_pasta": nome_pasta,
+                    "session_id": session_id,
                     "documentos": lista_docs,
+                    "docs_revisao": docs_revisao,  # lista flat pra UI de edicao
                     "total": len(resultados),
                     "com_data": sum(1 for r in resultados if r.get("data")),
                     "sem_data": sum(1 for r in resultados if not r.get("data")),
@@ -1669,6 +1700,69 @@ def processar_stream():
         'X-Accel-Buffering': 'no',
         'Cache-Control': 'no-cache',
     })
+
+
+@app.route("/gerar-zip-revisado/<session_id>", methods=["POST"])
+def gerar_zip_revisado(session_id):
+    """Recebe lista de docs editados pelo usuario e monta o ZIP final.
+    Body JSON: {"docs": [{id, tipo, data, deletar, ordem?}, ...]}
+    """
+    sess = ler_sessao(session_id)
+    if not sess:
+        return jsonify({"erro": "Sessao expirada ou nao encontrada. Processe novamente."}), 404
+
+    try:
+        body = request.get_json(silent=True) or {}
+        docs_edit_raw = body.get("docs", [])
+
+        # Mapa dos docs originais por id pra preencher campos nao enviados
+        docs_orig_map = {d["id"]: d for d in sess["docs"]}
+
+        # Junta edicoes com dados originais, preservando a ordem enviada pelo frontend
+        docs_editados = []
+        for d_edit in docs_edit_raw:
+            orig = docs_orig_map.get(d_edit.get("id"))
+            if not orig:
+                continue
+            # Merge: usa valores editados, ou os originais se nao enviou
+            docs_editados.append({
+                "id": orig["id"],
+                "arquivo": orig["arquivo"],
+                "extensao": orig["extensao"],
+                "nome_original": orig.get("nome_original", ""),
+                "tipo": d_edit.get("tipo", orig.get("tipo")),
+                "data": d_edit.get("data", orig.get("data")),
+                "data_fonte": orig.get("data_fonte"),
+                "aviso": orig.get("aviso"),
+                "deletar": bool(d_edit.get("deletar", False)),
+            })
+
+        # Monta ZIP num tmp_dir novo
+        tmp_dir = tempfile.mkdtemp()
+        try:
+            resultado = montar_zip_final(sess["contexto"], docs_editados, sess["sess_dir"], tmp_dir)
+        finally:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
+        contexto = sess["contexto"]
+        registrar_uso(contexto.get("usuario"), contexto.get("nome_cliente"),
+                     contexto.get("tipo_processo"), resultado["total"], "sucesso_revisado")
+
+        return jsonify({
+            "sucesso": True,
+            "nome_pasta": resultado["nome_pasta"],
+            "documentos": resultado["lista_docs"],
+            "total": resultado["total"],
+            "com_data": resultado["com_data"],
+            "sem_data": resultado["sem_data"],
+            "avisos": resultado["avisos"],
+        })
+
+    except Exception as e:
+        registrar_erro(sess["contexto"].get("usuario"), sess["contexto"].get("nome_cliente"),
+                      sess["contexto"].get("tipo_processo"), "",
+                      "excecao_gerar_zip_revisado", e)
+        return jsonify({"erro": str(e)}), 500
 
 
 @app.route("/download/<nome_pasta>")
@@ -1700,6 +1794,304 @@ def limpar_zips_antigos(max_idade_segundos=3600):
                     pass
     except Exception:
         pass
+
+
+def limpar_sessoes_antigas(max_idade_segundos=3600):
+    """Remove diretorios de sessao com mais de 1 hora."""
+    try:
+        agora = time.time()
+        for sess_dir in SESSIONS_DIR.iterdir():
+            if sess_dir.is_dir() and agora - sess_dir.stat().st_mtime > max_idade_segundos:
+                try:
+                    shutil.rmtree(sess_dir, ignore_errors=True)
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+
+def salvar_sessao(session_id, contexto, docs):
+    """Salva uma sessao de revisao em disco.
+
+    contexto: dict com usuario, nome_cliente, tipo_processo, limite_arquivo, nome_limpo, nome_pasta_zip
+    docs: lista flat de dicts com arquivo_tmp, tipo, data, extensao, nome_original, _data_fonte, _aviso
+          (os arquivos sao copiados para SESSIONS_DIR/<session_id>/)
+    """
+    sess_dir = SESSIONS_DIR / session_id
+    sess_dir.mkdir(exist_ok=True)
+
+    docs_meta = []
+    for i, doc in enumerate(docs):
+        arq_src = doc.get("arquivo_tmp")
+        if not arq_src or not os.path.exists(arq_src):
+            continue
+        ext = doc.get("extensao") or Path(arq_src).suffix.lower() or ".pdf"
+        nome_arq_sessao = f"doc-{i:03d}{ext}"
+        dest = sess_dir / nome_arq_sessao
+        try:
+            shutil.copy2(arq_src, dest)
+        except Exception:
+            continue
+        docs_meta.append({
+            "id": f"doc-{i:03d}",
+            "arquivo": nome_arq_sessao,
+            "tipo": doc.get("tipo", "desconhecido"),
+            "data": doc.get("data"),
+            "data_fonte": doc.get("_data_fonte"),
+            "nome_original": doc.get("nome_original", ""),
+            "aviso": doc.get("_aviso"),
+            "extensao": ext,
+        })
+
+    metadata = {
+        "contexto": contexto,
+        "docs": docs_meta,
+        "created_at": datetime.now().isoformat(),
+    }
+    with open(sess_dir / "metadata.json", "w", encoding="utf-8") as f:
+        json.dump(metadata, f, ensure_ascii=False, indent=2)
+    return metadata
+
+
+def ler_sessao(session_id):
+    """Le metadata e retorna contexto + docs. None se sessao nao existe."""
+    sess_dir = SESSIONS_DIR / session_id
+    meta_path = sess_dir / "metadata.json"
+    if not meta_path.exists():
+        return None
+    try:
+        with open(meta_path, "r", encoding="utf-8") as f:
+            meta = json.load(f)
+        meta["sess_dir"] = str(sess_dir)
+        return meta
+    except Exception:
+        return None
+
+
+def montar_zip_final(contexto, docs_editados, sess_dir, tmp_dir):
+    """Monta o ZIP final a partir de uma lista de docs (ja editados pelo usuario).
+
+    docs_editados: lista de dicts [{id, tipo, data, deletar, arquivo, extensao, nome_original, aviso, data_fonte}]
+      Nota: ordem da lista = ordem final no ZIP (menos merges de grupo/categoria).
+    Aplica classificacao e merge de grupos baseado nos TIPOS editados.
+    Retorna dict com nome_pasta, lista_docs, relatorio, zip_bytes.
+    """
+    tipo_processo = contexto["tipo_processo"]
+    nome_cliente = contexto["nome_cliente"]
+    usuario = contexto.get("usuario", "")
+    limite_arquivo = LIMITES_TAMANHO.get(tipo_processo, MAX_FILE_SIZE_BYTES)
+
+    # Filtra docs deletados
+    docs_ativos = [d for d in docs_editados if not d.get("deletar")]
+
+    # Recria a estrutura de arquivo_tmp apontando pros arquivos da sessao
+    for d in docs_ativos:
+        d["arquivo_tmp"] = os.path.join(sess_dir, d["arquivo"])
+
+    # Aplica mesma logica de ETAPA 1 (protocolos) + ETAPA 2 (classificacao) + ETAPA 2.5 (grupos)
+    # Mas preservando a ordem que o usuario deixou na lista
+
+    # ETAPA 1 — protocolos em processos judiciais: anexa ao doc anterior
+    resultados_processados = []
+    protocolos_pendentes = []
+    for r in docs_ativos:
+        if eh_protocolo_assinatura(r) and tipo_processo != "inss_admin":
+            if resultados_processados:
+                ultimo = resultados_processados[-1]
+                cat_ultimo = classificar_doc(ultimo, tipo_processo)
+                if cat_ultimo in CATEGORIAS_ASSINADAS:
+                    merged_path = os.path.join(tmp_dir, f"merged_{len(resultados_processados)}.pdf")
+                    if merge_pdfs([ultimo["arquivo_tmp"], r["arquivo_tmp"]], merged_path):
+                        ultimo["arquivo_tmp"] = merged_path
+                        ultimo["nome_original"] = (ultimo.get("nome_original") or "") + " + protocolo"
+                        continue
+            protocolos_pendentes.append(r)
+        else:
+            resultados_processados.append(r)
+
+    # ETAPA 2 — classificar
+    sequencia = SEQUENCIA_JUDICIAL if tipo_processo != "inss_admin" else SEQUENCIA_INSS_ADMIN
+    categorias_validas = [cat for cat, _ in sequencia]
+    if tipo_processo == "inss_admin":
+        for grupo, componentes in GRUPO_MERGE_ADMIN.items():
+            categorias_validas.extend(componentes)
+    docs_por_categoria = {cat: [] for cat in categorias_validas}
+    docs_cronologicos = []
+    for r in resultados_processados:
+        cat = classificar_doc(r, tipo_processo)
+        if cat and cat in docs_por_categoria:
+            docs_por_categoria[cat].append(r)
+        else:
+            docs_cronologicos.append(r)
+
+    # ETAPA 2.5 — agrupamento admin
+    if tipo_processo == "inss_admin":
+        for grupo, componentes in GRUPO_MERGE_ADMIN.items():
+            grupo_docs = []
+            for comp in componentes:
+                grupo_docs.extend(docs_por_categoria.pop(comp, []))
+            if grupo_docs:
+                # Mantem a ordem que o usuario deixou
+                docs_por_categoria[grupo] = grupo_docs
+
+    # Ordena cronologicos por data
+    docs_cronologicos.sort(key=lambda r: r.get("data") or "9999-99-99")
+    for cat in CATEGORIAS_MERGE:
+        if cat in docs_por_categoria and cat not in GRUPO_MERGE_ADMIN:
+            docs_por_categoria[cat].sort(key=lambda r: r.get("data") or "9999-99-99")
+
+    # ETAPA 3 — monta ZIP
+    zip_buffer = io.BytesIO()
+    nome_limpo = limpar_nome(nome_cliente)
+    uid = uuid.uuid4().hex[:8]
+    nome_pasta = f"{nome_limpo}_{tipo_processo}_{uid}"
+    nome_pasta_zip = f"{nome_limpo}_{tipo_processo}"
+    limite_mb = limite_arquivo // (1024 * 1024)
+    relatorio_linhas = [
+        f"Relatorio de Organizacao - {nome_cliente}",
+        f"Tipo: {TIPOS_PROCESSO[tipo_processo]}",
+        f"Data: {datetime.now().strftime('%Y-%m-%d %H:%M')}",
+        f"Total de documentos separados: {len(resultados_processados)}",
+        f"Limite por arquivo: {limite_mb}MB",
+        "-" * 50, "",
+    ]
+    avisos_relatorio = list({r.get("aviso") for r in docs_ativos if r.get("aviso")})
+    if avisos_relatorio:
+        relatorio_linhas.insert(5, "")
+        relatorio_linhas.insert(5, "AVISOS:")
+        for a in avisos_relatorio:
+            relatorio_linhas.insert(6, f"  - {a}")
+
+    lista_docs = []
+    ordem = 1
+
+    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+        for cat, label in sequencia:
+            docs_cat = docs_por_categoria.get(cat, [])
+            if not docs_cat:
+                continue
+            if cat in CATEGORIAS_MERGE and len(docs_cat) > 1:
+                merged_path = os.path.join(tmp_dir, f"merged_{cat}.pdf")
+                caminhos = [r["arquivo_tmp"] for r in docs_cat]
+                if merge_pdfs(caminhos, merged_path):
+                    nome_label = label or limpar_nome(docs_cat[0].get("tipo", "documento"))[:30].upper()
+                    partes = dividir_pdf_por_tamanho(merged_path, tmp_dir, max_bytes=limite_arquivo)
+                    for idx, parte_path in enumerate(partes):
+                        sufixo = f"_parte{idx+1}" if len(partes) > 1 else ""
+                        novo_nome = f"{ordem:02d}_{nome_limpo}_{nome_label}{sufixo}.pdf"
+                        zf.write(parte_path, f"{nome_pasta_zip}/{novo_nome}")
+                        relatorio_linhas.append(f"{novo_nome} | {len(docs_cat)} docs merged")
+                        lista_docs.append({
+                            "ordem": ordem, "nome": novo_nome,
+                            "original": f"{len(docs_cat)} documentos merged",
+                            "tipo": label or cat, "data": None,
+                        })
+                        ordem += 1
+                    continue
+            for r in docs_cat:
+                nome_label = label or limpar_nome(r.get("tipo", "documento"))[:30].upper()
+                ext = r.get("extensao", ".pdf")
+                if ext == ".pdf" and os.path.getsize(r["arquivo_tmp"]) > limite_arquivo:
+                    partes = dividir_pdf_por_tamanho(r["arquivo_tmp"], tmp_dir, max_bytes=limite_arquivo)
+                    for idx, parte_path in enumerate(partes):
+                        sufixo = f"_parte{idx+1}" if len(partes) > 1 else ""
+                        novo_nome = f"{ordem:02d}_{nome_limpo}_{nome_label}{sufixo}{ext}"
+                        zf.write(parte_path, f"{nome_pasta_zip}/{novo_nome}")
+                        fonte = r.get("data_fonte")
+                        fonte_txt = f" [fonte: {fonte}]" if fonte and fonte != "ia" else ""
+                        relatorio_linhas.append(
+                            f"{novo_nome} | Original: {r.get('nome_original','')} | Data: {r.get('data', 'N/A')}{fonte_txt}"
+                        )
+                        lista_docs.append({
+                            "ordem": ordem, "nome": novo_nome,
+                            "original": r.get("nome_original", ""),
+                            "tipo": r.get("tipo", "?"), "data": r.get("data"),
+                            "data_fonte": r.get("data_fonte"),
+                        })
+                        ordem += 1
+                else:
+                    novo_nome = f"{ordem:02d}_{nome_limpo}_{nome_label}{ext}"
+                    zf.write(r["arquivo_tmp"], f"{nome_pasta_zip}/{novo_nome}")
+                    fonte = r.get("data_fonte")
+                    fonte_txt = f" [fonte: {fonte}]" if fonte and fonte != "ia" else ""
+                    relatorio_linhas.append(
+                        f"{novo_nome} | Original: {r.get('nome_original','')} | Tipo: {r.get('tipo','?')} | Data: {r.get('data', 'N/A')}{fonte_txt}"
+                    )
+                    lista_docs.append({
+                        "ordem": ordem, "nome": novo_nome,
+                        "original": r.get("nome_original", ""),
+                        "tipo": r.get("tipo", "?"), "data": r.get("data"),
+                        "data_fonte": r.get("data_fonte"),
+                    })
+                    ordem += 1
+
+        for r in docs_cronologicos:
+            tipo_limpo = limpar_nome(r.get("tipo", "documento"))[:30]
+            data_str = r.get("data") or "sem_data"
+            ext = r.get("extensao", ".pdf")
+            if ext == ".pdf" and os.path.getsize(r["arquivo_tmp"]) > limite_arquivo:
+                partes = dividir_pdf_por_tamanho(r["arquivo_tmp"], tmp_dir, max_bytes=limite_arquivo)
+                for idx, parte_path in enumerate(partes):
+                    sufixo = f"_parte{idx+1}" if len(partes) > 1 else ""
+                    novo_nome = f"{ordem:02d}_{nome_limpo}_{data_str}_{tipo_limpo}{sufixo}{ext}"
+                    zf.write(parte_path, f"{nome_pasta_zip}/{novo_nome}")
+                    fonte = r.get("data_fonte")
+                    fonte_txt = f" [fonte: {fonte}]" if fonte and fonte != "ia" else ""
+                    relatorio_linhas.append(
+                        f"{novo_nome} | Original: {r.get('nome_original','')} | Data: {r.get('data', 'NAO ENCONTRADA')}{fonte_txt}"
+                    )
+                    lista_docs.append({
+                        "ordem": ordem, "nome": novo_nome,
+                        "original": r.get("nome_original", ""),
+                        "tipo": r.get("tipo", "?"), "data": r.get("data"),
+                        "data_fonte": r.get("data_fonte"),
+                    })
+                    ordem += 1
+            else:
+                novo_nome = f"{ordem:02d}_{nome_limpo}_{data_str}_{tipo_limpo}{ext}"
+                zf.write(r["arquivo_tmp"], f"{nome_pasta_zip}/{novo_nome}")
+                fonte = r.get("data_fonte")
+                fonte_txt = f" [fonte: {fonte}]" if fonte and fonte != "ia" else ""
+                relatorio_linhas.append(
+                    f"{novo_nome} | Original: {r.get('nome_original','')} | Tipo: {r.get('tipo','?')} | Data: {r.get('data', 'NAO ENCONTRADA')}{fonte_txt}"
+                )
+                lista_docs.append({
+                    "ordem": ordem, "nome": novo_nome,
+                    "original": r.get("nome_original", ""),
+                    "tipo": r.get("tipo", "?"), "data": r.get("data"),
+                    "data_fonte": r.get("data_fonte"),
+                })
+                ordem += 1
+
+        for r in protocolos_pendentes:
+            ext = r.get("extensao", ".pdf")
+            novo_nome = f"{ordem:02d}_{nome_limpo}_Protocolo_Assinatura{ext}"
+            zf.write(r["arquivo_tmp"], f"{nome_pasta_zip}/{novo_nome}")
+            relatorio_linhas.append(f"{novo_nome} | PROTOCOLO ORFAO")
+            lista_docs.append({
+                "ordem": ordem, "nome": novo_nome,
+                "original": r.get("nome_original", ""),
+                "tipo": "Protocolo Assinatura", "data": None,
+            })
+            ordem += 1
+
+        relatorio_linhas.append("")
+        relatorio_linhas.append("Gerado por: Organizador Juridico AB Group")
+        zf.writestr(f"{nome_pasta_zip}/_relatorio.txt", "\n".join(relatorio_linhas))
+
+    zip_buffer.seek(0)
+    shared_zip = SHARED_ZIP_DIR / f"{nome_pasta}.zip"
+    with open(shared_zip, "wb") as f:
+        f.write(zip_buffer.getvalue())
+
+    return {
+        "nome_pasta": nome_pasta,
+        "lista_docs": lista_docs,
+        "total": len(docs_ativos),
+        "com_data": sum(1 for r in docs_ativos if r.get("data")),
+        "sem_data": sum(1 for r in docs_ativos if not r.get("data")),
+        "avisos": avisos_relatorio,
+    }
 
 
 if __name__ == "__main__":
