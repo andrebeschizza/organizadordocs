@@ -66,20 +66,23 @@ IMPORTANTE: Responda SEMPRE em portugues brasileiro. NUNCA use ingles.
 Use EXATAMENTE um destes tipos (escreva identico, sem traduzir):
 - Procuracao
 - Substabelecimento
-- Declaracao de Hipossuficiencia
-- Declaracao (outras declaracoes sem ser hipossuficiencia)
+- Declaracao de Hipossuficiencia     (cliente declara que nao pode pagar custas)
+- Declaracao de Residencia            (cliente declara onde mora)
+- Declaracao de Beneficios INSS       (documento DO INSS listando beneficios)
+- Declaracao                          (outras declaracoes do cliente)
 - Contrato de Honorarios
 - Termo de Responsabilidade
 - Termo de Representacao
-- Protocolo de Assinatura (gerado por DocuSign, Clicksign, ZapSign, D4Sign - vem APOS documento assinado)
+- Protocolo de Assinatura             (gerado por DocuSign, Clicksign, ZapSign, D4Sign, etc)
+- Relatorio de Assinaturas            (relatorio ZapSign com assinantes e tokens)
+- Comunicacao de Decisao              (documento DO INSS com decisao sobre beneficio)
+- Carta Indeferimento INSS
 - RG
 - CPF
 - CNH
 - Documento de Identidade
 - CNIS
 - CTPS
-- Carta Indeferimento INSS
-- Decisao INSS
 - Atestado Medico
 - Relatorio Medico
 - Receita Medica
@@ -108,19 +111,31 @@ Use EXATAMENTE um destes tipos (escreva identico, sem traduzir):
 - Calculo Renda Mensal
 - Copia Processo Administrativo
 - Certidao Negativa Justica Estadual
+- Protocolo de Requerimento INSS      (formulario de pedido de beneficio no MeuINSS)
+- Print TRF / Print Processo          (lista de processos judiciais)
 
-REGRAS:
+REGRAS CRITICAS DE DIFERENCIACAO:
+1. "Declaracao de Beneficios" (do INSS) NAO e a mesma coisa que "Declaracao de Hipossuficiencia"
+   (do cliente). O INSS emite a de Beneficios. O cliente emite a de Hipossuficiencia.
+2. "Comunicacao de Decisao" (INSS informa negado/concedido) NAO e "Declaracao".
+3. "Termo de Representacao" deve ser classificado como "Termo de Responsabilidade" na saida
+   (e o mesmo tipo pro fluxo).
+4. "Relatorio de Assinaturas" da ZapSign/Clicksign deve ser classificado como
+   "Protocolo de Assinatura" (e o mesmo tipo).
+
+REGRAS GERAIS:
 - Cada documento pode ter 1 ou mais paginas
 - Uma procuracao de 3 paginas NAO e 3 procuracoes - e UMA procuracao (pagina_inicio=1, pagina_fim=3)
-- "Protocolo de Assinatura" e um documento separado que vem APOS o documento assinado
-- Identifique onde cada documento COMECA e TERMINA
-- A data deve ser a data de emissao/expedicao do documento (no texto), NAO a data de hoje
+- "Protocolo de Assinatura" vem APOS o documento assinado
+- A data deve ser a data de emissao/expedicao (no texto), NAO a data de hoje
 
 Responda APENAS em JSON valido, sem markdown:
 {"documentos": [
-  {"tipo": "Procuracao", "pagina_inicio": 1, "pagina_fim": 3, "data": "2023-03-15"},
-  {"tipo": "Protocolo de Assinatura", "pagina_inicio": 4, "pagina_fim": 4, "data": null},
-  {"tipo": "RG", "pagina_inicio": 5, "pagina_fim": 5, "data": null}
+  {"tipo": "Procuracao", "pagina_inicio": 1, "pagina_fim": 1, "data": "2026-03-14"},
+  {"tipo": "Protocolo de Assinatura", "pagina_inicio": 2, "pagina_fim": 2, "data": null},
+  {"tipo": "Declaracao de Residencia", "pagina_inicio": 3, "pagina_fim": 3, "data": "2026-03-14"},
+  {"tipo": "Declaracao de Beneficios INSS", "pagina_inicio": 4, "pagina_fim": 4, "data": "2025-10-17"},
+  {"tipo": "Comunicacao de Decisao", "pagina_inicio": 5, "pagina_fim": 5, "data": "2026-04-02"}
 ]}
 
 Se nao encontrar data, use "data": null.
@@ -131,8 +146,25 @@ PROMPT_EXTRACAO_SIMPLES = """Analise este documento juridico brasileiro.
 IMPORTANTE: Responda SEMPRE em portugues brasileiro, nunca em ingles.
 
 Extraia:
-1. Tipo do documento (use EXATAMENTE: Procuracao, Substabelecimento, Declaracao de Hipossuficiencia, Declaracao, Contrato de Honorarios, Termo de Responsabilidade, Termo de Representacao, Protocolo de Assinatura, RG, CPF, CNH, CNIS, CTPS, Carta Indeferimento INSS, Atestado Medico, Relatorio Medico, Receita Medica, Exame Medico, Laudo Medico, Laudo MeuINSS, Certidao de Casamento, Certidao de Nascimento, Certidao de Obito, Documentos Rurais, Folha V7, Declaracao Tempo Servico, Ficha Funcionario, Certidao Tempo Servico, Ficha Financeira, PPP, LTCAT, GPS, Comprovante Residencia, Comprovante Gasto, Foto Residencia)
-2. Data de emissao/expedicao DO DOCUMENTO (lida no texto, NAO a data atual)
+1. Tipo do documento. Use EXATAMENTE um destes (copiar identico):
+   Procuracao, Substabelecimento, Declaracao de Hipossuficiencia, Declaracao de Residencia,
+   Declaracao de Beneficios INSS, Declaracao, Contrato de Honorarios, Termo de Responsabilidade,
+   Termo de Representacao, Protocolo de Assinatura, Relatorio de Assinaturas, Comunicacao de Decisao,
+   Carta Indeferimento INSS, RG, CPF, CNH, CNIS, CTPS, Atestado Medico, Relatorio Medico,
+   Receita Medica, Exame Medico, Laudo Medico, Laudo MeuINSS, Certidao de Casamento,
+   Certidao de Nascimento, Certidao de Obito, Documentos Rurais, Folha V7, Declaracao Tempo Servico,
+   Ficha Funcionario, Certidao Tempo Servico, Ficha Financeira, PPP, LTCAT, GPS,
+   Comprovante Residencia, Comprovante Gasto, Foto Residencia, Protocolo de Requerimento INSS,
+   Print TRF, Pericia Medica
+2. Data de emissao/expedicao DO DOCUMENTO (procure no TOPO, RODAPE ou DATA EXPLICITA no texto).
+   Formatos possiveis: DD/MM/YYYY, DD-MM-YYYY, "14 de Marco de 2026", YYYY-MM-DD.
+   NAO use a data atual nem data de impressao do sistema.
+
+DIFERENCIACAO IMPORTANTE:
+- "Declaracao de Beneficios" e um DOCUMENTO DO INSS listando beneficios. NUNCA e do cliente.
+- "Declaracao de Hipossuficiencia" e do CLIENTE declarando ser pobre pra nao pagar custas.
+- "Declaracao de Residencia" e do CLIENTE declarando onde mora.
+- "Comunicacao de Decisao" e do INSS informando negado/concedido.
 
 Responda APENAS em JSON valido, sem markdown:
 {"tipo": "...", "data": "YYYY-MM-DD"}
@@ -155,14 +187,20 @@ Se nao encontrar data, use "data": null.
 CHUNK_SIZE_PAGINAS = 8  # paginas por chunk para PDFs grandes
 
 # Sequencia para INSS Administrativo
-# IMPORTANTE:
-# - grupo_procuracao_termos = procuracoes + substabelecimentos + termos + declaracoes + protocolos juntos
-# - contrato_de_honorarios FICA SEMPRE SEPARADO (documento sigiloso entre advogado e cliente,
-#   nao compoe os documentos do processo)
+# REGRA (definida pelo time Jaine/Andre):
+# - grupo_procuracao_termos = procuracao + substabelecimento + termo_representacao + protocolo
+#   (APENAS esses 4 tipos no mesmo arquivo)
+# - DECLARACOES (residencia, hipossuficiencia, beneficios INSS) ficam SEPARADAS
+# - Documentos do INSS (comunicacao decisao, declaracao beneficios) ficam SEPARADOS
+# - Contrato de Honorarios SEMPRE separado (sigiloso, nao vai pro processo)
 SEQUENCIA_INSS_ADMIN = [
-    ("grupo_procuracao_termos", "Procuracao_Termos_Declaracoes"),
+    ("grupo_procuracao_termos", "Procuracao_Termos_Assinaturas"),
+    ("declaracao_hipossuficiencia", "Declaracao_Hipossuficiencia"),
+    ("declaracao", "Declaracao"),
     ("contrato_de_honorarios", "Contrato_de_Honorarios_SIGILOSO"),
     ("documento_pessoal", None),  # usa tipo real
+    ("carta_indeferimento", "Comunicacao_Decisao_INSS"),
+    ("declaracao_beneficios_inss", "Declaracao_Beneficios_INSS"),
 ]
 
 # Sequencia detalhada para Processos Judiciais
@@ -222,16 +260,17 @@ CATEGORIAS_ASSINADAS = {
     "termo_de_responsabilidade",
 }
 
-# Para INSS admin: agrupar estas categorias em UM UNICO arquivo
-# (procuracoes + substabelecimentos + termos + declaracoes + protocolos de assinatura)
-# NOTA: contrato_de_honorarios NAO entra aqui (fica sempre separado, e sigiloso)
+# Para INSS admin: agrupar EXCLUSIVAMENTE estes tipos em UM UNICO arquivo
+# (procuracoes + substabelecimentos + termos + protocolos de assinatura)
+# NAO entra aqui:
+#   - declaracoes de qualquer tipo (residencia, hipossuficiencia, beneficios)
+#   - contrato_de_honorarios (sigiloso)
+#   - qualquer documento do INSS (comunicacao decisao, declaracao beneficios)
 GRUPO_MERGE_ADMIN = {
     "grupo_procuracao_termos": [
         "procuracao",
         "substabelecimento",
         "termo_de_responsabilidade",
-        "declaracao",
-        "declaracao_hipossuficiencia",
         "protocolo_assinatura",
     ],
 }
@@ -477,6 +516,30 @@ def mapear_documentos_pdf(client, caminho, nome_arquivo):
         if aviso_truncado:
             doc["_aviso"] = aviso_truncado
         return [doc]
+
+    # === PDF escaneado (>= 70% das paginas sem texto): processa pagina por pagina via Vision ===
+    # Caso do "PRINT ...jpg" ou DOCS MEDICOS com fotos — pdfplumber nao extrai texto.
+    paginas_sem_texto = sum(1 for p in paginas if not p["texto"].strip())
+    if paginas_sem_texto >= total_paginas * 0.7 and total_paginas <= 15:
+        docs_scan = []
+        for p in paginas:
+            img_b64 = pagina_para_imagem_b64(caminho, p["pagina"])
+            if not img_b64:
+                continue
+            resultado = analisar_imagem_simples(client, img_b64, nome_arquivo)
+            img_b64 = None  # libera memoria
+            docs_scan.append({
+                "tipo": resultado.get("tipo", "desconhecido"),
+                "pagina_inicio": p["pagina"],
+                "pagina_fim": p["pagina"],
+                "data": resultado.get("data"),
+            })
+        if docs_scan:
+            # Junta paginas consecutivas do mesmo tipo (ex: laudo medico de 3 paginas)
+            docs_scan = _merge_boundary_docs(docs_scan)
+            if aviso_truncado:
+                docs_scan[0]["_aviso"] = aviso_truncado
+            return docs_scan
 
     # === PDF pequeno (ate CHUNK_SIZE paginas): chamada unica (comportamento original) ===
     if total_paginas <= CHUNK_SIZE_PAGINAS:
@@ -784,8 +847,10 @@ def classificar_doc(r, tipo_processo):
     """Retorna a categoria do doc para ordenacao baseada no tipo de processo."""
     tipo = limpar_nome(r.get("tipo", ""))
 
-    # Protocolo de assinatura digital
+    # Protocolo de assinatura digital (inclui "Relatorio de Assinaturas" do ZapSign, etc)
     if "protocolo" in tipo and "assinatura" in tipo:
+        return "protocolo_assinatura"
+    if "relatorio" in tipo and "assinatura" in tipo:
         return "protocolo_assinatura"
     # Substabelecimento (separado de procuracao)
     if "substabelecimento" in tipo:
@@ -793,25 +858,39 @@ def classificar_doc(r, tipo_processo):
     # Procuracao
     if "procuracao" in tipo:
         return "procuracao"
-    # Declaracao de hipossuficiencia (separada das demais)
-    if "declaracao" in tipo and ("hipossuficiencia" in tipo or "pobreza" in tipo):
-        return "declaracao_hipossuficiencia"
-    # Outras declaracoes
-    if "declaracao" in tipo and "tempo" in tipo and "servico" in tipo:
-        return "declaracao_tempo_servico"
-    if "declaracao" in tipo:
-        return "declaracao"
-    # Contrato de honorarios
-    if "contrato" in tipo and "honorario" in tipo:
-        return "contrato_de_honorarios"
-    # Termo de responsabilidade
-    if "termo" in tipo and "responsabilidade" in tipo:
-        return "termo_de_responsabilidade"
+    # === DOCUMENTOS DO INSS (NUNCA entram no grupo admin, ficam separados) ===
+    # Declaracao de Beneficios INSS (documento emitido pelo INSS)
+    if "declaracao" in tipo and ("beneficio" in tipo or "inss" in tipo):
+        return "declaracao_beneficios_inss"
+    if "declaracao" in tipo and "sistema_unico" in tipo:
+        return "declaracao_beneficios_inss"
+    # Comunicacao de Decisao INSS
+    if "comunicacao" in tipo and "decisao" in tipo:
+        return "carta_indeferimento"
     # Carta de indeferimento INSS
     if "carta" in tipo and "indeferimento" in tipo:
         return "carta_indeferimento"
     if "decisao" in tipo and "inss" in tipo:
         return "carta_indeferimento"
+    if ("indeferimento" in tipo or "negado" in tipo) and ("inss" in tipo or "beneficio" in tipo):
+        return "carta_indeferimento"
+    # === DECLARACOES DO CLIENTE (ficam separadas, nao vao pro grupo admin) ===
+    # Declaracao de hipossuficiencia (tem categoria propria)
+    if "declaracao" in tipo and ("hipossuficiencia" in tipo or "pobreza" in tipo):
+        return "declaracao_hipossuficiencia"
+    # Outras declaracoes
+    if "declaracao" in tipo and "tempo" in tipo and "servico" in tipo:
+        return "declaracao_tempo_servico"
+    if "declaracao" in tipo and "residencia" in tipo:
+        return "declaracao"  # declaracao de residencia do cliente
+    if "declaracao" in tipo:
+        return "declaracao"
+    # Contrato de honorarios
+    if "contrato" in tipo and "honorario" in tipo:
+        return "contrato_de_honorarios"
+    # Termo de responsabilidade / representacao
+    if "termo" in tipo and ("responsabilidade" in tipo or "representacao" in tipo):
+        return "termo_de_responsabilidade"
     # CNIS
     if "cnis" in tipo:
         return "cnis"
