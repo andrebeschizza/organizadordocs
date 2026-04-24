@@ -371,6 +371,109 @@
             letter-spacing: 0.5px;
         }
 
+        /* REVISAO MANUAL (#2.2) */
+        .revisao {
+            display: none;
+        }
+        .revisao.show {
+            display: block;
+        }
+        .revisao-banner {
+            background: #ebf8ff;
+            border-left: 4px solid var(--azul-claro);
+            padding: 12px 14px;
+            border-radius: 8px;
+            font-size: 13px;
+            color: #2c5282;
+            margin-bottom: 16px;
+            line-height: 1.5;
+        }
+        .doc-edit {
+            background: white;
+            border: 1px solid var(--cinza-borda);
+            border-radius: 8px;
+            padding: 12px;
+            margin-bottom: 8px;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+        .doc-edit.deletado {
+            opacity: 0.4;
+            background: #fff5f5;
+            border-color: #fed7d7;
+        }
+        .doc-edit-head {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .doc-edit-num {
+            background: var(--azul);
+            color: white;
+            width: 24px; height: 24px;
+            border-radius: 50%;
+            display: flex; align-items: center; justify-content: center;
+            font-size: 11px; font-weight: 700;
+            flex-shrink: 0;
+        }
+        .doc-edit-orig {
+            font-size: 11px;
+            color: #718096;
+            flex: 1;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        .doc-edit-del {
+            background: none;
+            border: 1px solid #fed7d7;
+            color: var(--vermelho);
+            padding: 4px 8px;
+            border-radius: 6px;
+            font-size: 11px;
+            cursor: pointer;
+        }
+        .doc-edit-del:hover {
+            background: #fff5f5;
+        }
+        .doc-edit-del.ativo {
+            background: var(--vermelho);
+            color: white;
+        }
+        .doc-edit-row {
+            display: flex;
+            gap: 8px;
+        }
+        .doc-edit-row > * {
+            flex: 1;
+        }
+        .doc-edit select, .doc-edit input[type="text"], .doc-edit input[type="date"] {
+            padding: 8px 10px;
+            font-size: 13px;
+            border: 1.5px solid var(--cinza-borda);
+            border-radius: 6px;
+            background: var(--cinza-bg);
+            width: 100%;
+        }
+        .doc-edit select:focus, .doc-edit input:focus {
+            outline: none;
+            border-color: var(--azul-claro);
+            background: white;
+        }
+        .doc-edit label {
+            font-size: 10px;
+            text-transform: uppercase;
+            color: #a0aec0;
+            letter-spacing: 0.5px;
+            margin-bottom: 2px;
+        }
+        .doc-edit-fonte {
+            font-size: 10px;
+            color: var(--amarelo);
+            font-weight: 600;
+        }
+
         /* ERRO */
         .erro {
             display: none;
@@ -466,6 +569,26 @@
             </div>
             <div id="progressPercent" style="font-size: 12px; color: #a0aec0; margin-top: 8px;">0%</div>
         </div>
+    </div>
+
+    <!-- REVISAO MANUAL (#2.2) -->
+    <div class="revisao" id="revisao">
+        <div class="card">
+            <div class="card-title">Revisar antes de gerar o ZIP</div>
+            <div class="revisao-banner" id="revisaoAvisos" style="display:none;"></div>
+            <div class="revisao-banner">
+                <strong>A IA classificou os documentos abaixo.</strong><br>
+                Corrija o que estiver errado (tipo, data) e apague docs que nao deveriam estar aqui.
+                Quando estiver tudo certo, clique em <strong>"Confirmar e Gerar ZIP"</strong>.
+            </div>
+            <div id="listaRevisao"></div>
+        </div>
+        <button class="btn btn-primary" id="btnConfirmarZip">
+            Confirmar e Gerar ZIP
+        </button>
+        <button class="btn btn-secondary" id="btnCancelarRevisao">
+            Cancelar
+        </button>
     </div>
 
     <!-- RESULTADO -->
@@ -607,6 +730,207 @@
         document.getElementById('usuario').value = usuarioSalvo;
     }
 
+    // =========================================================
+    // REVISAO MANUAL (#2.2)
+    // =========================================================
+
+    // Lista de tipos disponiveis no dropdown (ordem alfabetica)
+    const TIPOS_DOCUMENTOS = [
+        "Procuracao",
+        "Substabelecimento",
+        "Termo de Representacao",
+        "Termo de Responsabilidade",
+        "Protocolo de Assinatura",
+        "Relatorio de Assinaturas",
+        "Declaracao de Hipossuficiencia",
+        "Declaracao de Residencia",
+        "Declaracao de Beneficios INSS",
+        "Declaracao",
+        "Contrato de Honorarios",
+        "RG",
+        "CPF",
+        "CNH",
+        "Documento de Identidade",
+        "CNIS",
+        "CTPS",
+        "Comunicacao de Decisao",
+        "Carta Indeferimento INSS",
+        "Atestado Medico",
+        "Relatorio Medico",
+        "Receita Medica",
+        "Exame Medico",
+        "Laudo Medico",
+        "Laudo MeuINSS",
+        "Pericia Medica",
+        "Certidao de Casamento",
+        "Certidao de Nascimento",
+        "Certidao de Obito",
+        "Documentos Rurais",
+        "Folha V7",
+        "Declaracao Tempo Servico",
+        "Ficha Funcionario",
+        "Certidao Tempo Servico",
+        "Ficha Financeira",
+        "PPP",
+        "LTCAT",
+        "GPS",
+        "Comprovante Residencia",
+        "Comprovante Gasto",
+        "Foto Residencia",
+        "Print TRF",
+        "Protocolo de Requerimento INSS",
+        "desconhecido",
+    ];
+
+    let sessaoAtual = null;        // {id, docs: [...]}
+    let docsRevisao = [];          // copia editavel local
+
+    function mostrarRevisao(data) {
+        sessaoAtual = {
+            id: data.session_id,
+            nomePastaDireto: data.nome_pasta,  // fallback se usar o ZIP ja montado
+        };
+        docsRevisao = (data.docs_revisao || []).map(d => ({
+            ...d,
+            deletar: false,
+        }));
+
+        if (!sessaoAtual.id || docsRevisao.length === 0) {
+            // Sem sessao = fallback direto pro resultado
+            mostrarResultado(data);
+            return;
+        }
+
+        formulario.style.display = 'none';
+        document.getElementById('revisao').classList.add('show');
+
+        // Avisos no topo
+        const avisosRev = document.getElementById('revisaoAvisos');
+        if (data.avisos && data.avisos.length > 0) {
+            avisosRev.innerHTML = '<strong>⚠ Avisos:</strong><br>' +
+                data.avisos.map(a => `• ${a}`).join('<br>');
+            avisosRev.style.display = 'block';
+        } else {
+            avisosRev.style.display = 'none';
+        }
+
+        renderizarRevisao();
+    }
+
+    function renderizarRevisao() {
+        const lista = document.getElementById('listaRevisao');
+        lista.innerHTML = '';
+        docsRevisao.forEach((doc, idx) => {
+            const div = document.createElement('div');
+            div.className = 'doc-edit' + (doc.deletar ? ' deletado' : '');
+
+            // Dropdown de tipos
+            const selectOptions = TIPOS_DOCUMENTOS.map(t => {
+                const selected = (t.toLowerCase() === (doc.tipo || '').toLowerCase()) ? 'selected' : '';
+                return `<option value="${t}" ${selected}>${t}</option>`;
+            }).join('');
+
+            // Se o tipo atual nao esta na lista padrao, adiciona
+            const tipoNorm = (doc.tipo || '').toLowerCase();
+            let tipoCustomOption = '';
+            if (doc.tipo && !TIPOS_DOCUMENTOS.some(t => t.toLowerCase() === tipoNorm)) {
+                tipoCustomOption = `<option value="${doc.tipo}" selected>${doc.tipo} (sugerido pela IA)</option>`;
+            }
+
+            const fonteTxt = (doc.data_fonte && doc.data_fonte !== 'ia')
+                ? `<div class="doc-edit-fonte">⚠ Data extraida via ${doc.data_fonte} — verifique</div>`
+                : '';
+
+            div.innerHTML = `
+                <div class="doc-edit-head">
+                    <div class="doc-edit-num">${idx + 1}</div>
+                    <div class="doc-edit-orig">${doc.nome_original || ''}</div>
+                    <button class="doc-edit-del${doc.deletar ? ' ativo' : ''}" data-idx="${idx}">
+                        ${doc.deletar ? 'Desfazer' : '🗑 Apagar'}
+                    </button>
+                </div>
+                <div class="doc-edit-row">
+                    <div>
+                        <label>Tipo</label>
+                        <select data-idx="${idx}" data-field="tipo">
+                            ${tipoCustomOption}
+                            ${selectOptions}
+                        </select>
+                    </div>
+                    <div>
+                        <label>Data de emissao</label>
+                        <input type="date" data-idx="${idx}" data-field="data" value="${doc.data || ''}">
+                    </div>
+                </div>
+                ${fonteTxt}
+            `;
+            lista.appendChild(div);
+        });
+
+        // Listeners
+        lista.querySelectorAll('.doc-edit-del').forEach(btn => {
+            btn.addEventListener('click', () => {
+                const i = parseInt(btn.dataset.idx);
+                docsRevisao[i].deletar = !docsRevisao[i].deletar;
+                renderizarRevisao();
+            });
+        });
+        lista.querySelectorAll('select, input').forEach(el => {
+            el.addEventListener('change', () => {
+                const i = parseInt(el.dataset.idx);
+                const campo = el.dataset.field;
+                docsRevisao[i][campo] = el.value || null;
+            });
+        });
+    }
+
+    async function confirmarZip() {
+        if (!sessaoAtual || !sessaoAtual.id) return;
+
+        const btnConfirmar = document.getElementById('btnConfirmarZip');
+        btnConfirmar.disabled = true;
+        btnConfirmar.textContent = 'Gerando ZIP revisado...';
+
+        try {
+            const resp = await fetch(`/gerar-zip-revisado/${sessaoAtual.id}`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    docs: docsRevisao.map(d => ({
+                        id: d.id,
+                        tipo: d.tipo,
+                        data: d.data,
+                        deletar: d.deletar,
+                    })),
+                }),
+            });
+            const data = await resp.json();
+            if (data.erro) {
+                alert('Erro: ' + data.erro);
+                btnConfirmar.disabled = false;
+                btnConfirmar.textContent = 'Confirmar e Gerar ZIP';
+                return;
+            }
+
+            // Esconde revisao, mostra resultado
+            document.getElementById('revisao').classList.remove('show');
+            mostrarResultado(data);
+            btnConfirmar.disabled = false;
+            btnConfirmar.textContent = 'Confirmar e Gerar ZIP';
+        } catch (e) {
+            alert('Erro de conexao: ' + e.message);
+            btnConfirmar.disabled = false;
+            btnConfirmar.textContent = 'Confirmar e Gerar ZIP';
+        }
+    }
+
+    document.getElementById('btnConfirmarZip').addEventListener('click', confirmarZip);
+    document.getElementById('btnCancelarRevisao').addEventListener('click', () => {
+        document.getElementById('revisao').classList.remove('show');
+        formulario.style.display = 'block';
+        erro.classList.remove('show');
+    });
+
     // Mostra resultado final (chamado apos "complete" do stream)
     function mostrarResultado(data) {
         formulario.style.display = 'none';
@@ -741,7 +1065,7 @@
                             clearTimeout(timeoutId);
                             setTimeout(() => {
                                 progresso.classList.remove('show');
-                                mostrarResultado(evento.resultado);
+                                mostrarRevisao(evento.resultado);
                             }, 500);
                         } else if (evento.tipo === 'error') {
                             clearTimeout(timeoutId);
@@ -777,10 +1101,13 @@
     // Novo caso
     document.getElementById('btnNovo').addEventListener('click', () => {
         resultado.classList.remove('show');
+        document.getElementById('revisao').classList.remove('show');
         formulario.style.display = 'block';
         document.getElementById('nome_cliente').value = '';
         document.getElementById('tipo_processo').value = '';
         arquivos = [];
+        sessaoAtual = null;
+        docsRevisao = [];
         atualizarLista();
         erro.classList.remove('show');
     });
