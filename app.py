@@ -7,6 +7,7 @@ Separa automaticamente PDFs com multiplos documentos em arquivos individuais.
 
 import os
 import io
+import re
 import json
 import uuid
 import time
@@ -590,6 +591,100 @@ def analisar_imagem_simples(client, imagem_b64, nome_arquivo):
         return {"tipo": "desconhecido", "data": None}
 
 
+# ============ Extracao de data com fallbacks em cascata (#3.3) ============
+
+# Regex para datas comuns em nomes de arquivo
+# Aceita: 2023-03-15, 2023_03_15, 15-03-2023, 15/03/2023, 15.03.2023, 20230315
+_RE_DATAS_FILENAME = [
+    # YYYY-MM-DD ou YYYY_MM_DD ou YYYY.MM.DD
+    (re.compile(r"(20\d{2})[-_./](\d{1,2})[-_./](\d{1,2})"), "ymd"),
+    # DD-MM-YYYY ou DD/MM/YYYY
+    (re.compile(r"(\d{1,2})[-_./](\d{1,2})[-_./](20\d{2})"), "dmy"),
+    # YYYYMMDD compactado
+    (re.compile(r"(20\d{2})(\d{2})(\d{2})"), "ymd"),
+]
+
+
+def extrair_data_pdf_metadata(caminho):
+    """Tenta ler a data de criacao do PDF dos metadados. Retorna YYYY-MM-DD ou None."""
+    try:
+        from pypdf import PdfReader
+        reader = PdfReader(caminho)
+        meta = reader.metadata
+        if not meta:
+            return None
+        # Pega a data mais antiga entre CreationDate e ModDate (geralmente mais confiavel)
+        candidatos = []
+        for campo in ["/CreationDate", "/ModDate"]:
+            valor = meta.get(campo)
+            if valor:
+                candidatos.append(str(valor))
+        for raw in candidatos:
+            # Formato pdf: "D:20230315143022-03'00'" ou "D:20230315143022Z"
+            m = re.search(r"(20\d{2})(\d{2})(\d{2})", raw)
+            if m:
+                ano, mes, dia = m.groups()
+                # Valida mes/dia basicamente
+                if 1 <= int(mes) <= 12 and 1 <= int(dia) <= 31:
+                    return f"{ano}-{mes}-{dia}"
+        return None
+    except Exception:
+        return None
+
+
+def extrair_data_filename(nome_arquivo):
+    """Tenta extrair uma data do nome do arquivo. Retorna YYYY-MM-DD ou None."""
+    if not nome_arquivo:
+        return None
+    nome = Path(nome_arquivo).stem  # remove extensao
+    for regex, formato in _RE_DATAS_FILENAME:
+        m = regex.search(nome)
+        if not m:
+            continue
+        g1, g2, g3 = m.groups()
+        if formato == "ymd":
+            ano, mes, dia = g1, g2.zfill(2), g3.zfill(2)
+        else:  # dmy
+            dia, mes, ano = g1.zfill(2), g2.zfill(2), g3
+        # Validacao basica
+        try:
+            if 1 <= int(mes) <= 12 and 1 <= int(dia) <= 31 and 2000 <= int(ano) <= 2100:
+                return f"{ano}-{mes}-{dia}"
+        except ValueError:
+            continue
+    return None
+
+
+def resolver_data_fallback(resultado, caminho_original, nome_original):
+    """Aplica fallbacks em cascata pra tentar encontrar uma data quando a IA nao achou.
+    Modifica o dicionario 'resultado' in-place adicionando:
+    - data: YYYY-MM-DD ou None
+    - _data_fonte: "ia" | "pdf_metadata" | "filename" | None
+    """
+    # Se IA ja achou a data, marca como tal e retorna
+    if resultado.get("data"):
+        resultado["_data_fonte"] = "ia"
+        return
+
+    # Fallback 1: metadata do PDF
+    if caminho_original and Path(caminho_original).suffix.lower() == ".pdf":
+        data_meta = extrair_data_pdf_metadata(caminho_original)
+        if data_meta:
+            resultado["data"] = data_meta
+            resultado["_data_fonte"] = "pdf_metadata"
+            return
+
+    # Fallback 2: nome do arquivo original
+    data_nome = extrair_data_filename(nome_original)
+    if data_nome:
+        resultado["data"] = data_nome
+        resultado["_data_fonte"] = "filename"
+        return
+
+    # Sem data
+    resultado["_data_fonte"] = None
+
+
 def processar_arquivo_completo(client, caminho, nome_original, tmp_dir):
     """Processa um arquivo, separando-o em documentos individuais se necessario.
     Retorna lista de resultados (1 por documento encontrado)."""
@@ -926,6 +1021,9 @@ def processar():
             try:
                 # Processa e separa documentos automaticamente
                 docs_separados = processar_arquivo_completo(client, tmp_path, nome_original, tmp_dir)
+                # Aplica fallback de data em cada documento (metadata PDF / nome do arquivo)
+                for doc in docs_separados:
+                    resolver_data_fallback(doc, tmp_path, nome_original)
                 resultados.extend(docs_separados)
             except Exception as e:
                 # Nao falha o request inteiro — adiciona como documento desconhecido
@@ -935,6 +1033,7 @@ def processar():
                     "arquivo_tmp": tmp_path,
                     "nome_original": nome_original,
                     "extensao": ext,
+                    "_data_fonte": None,
                 })
                 registrar_erro(usuario, nome_cliente, tipo_processo, nome_original,
                               "excecao_processamento_arquivo", e)
@@ -1105,25 +1204,31 @@ def processar():
                         sufixo = f"_parte{idx+1}" if len(partes) > 1 else ""
                         novo_nome = f"{ordem:02d}_{nome_limpo}_{data_str}_{tipo_limpo}{sufixo}{r['extensao']}"
                         zf.write(parte_path, f"{nome_pasta_zip}/{novo_nome}")
+                        fonte = r.get("_data_fonte")
+                        fonte_txt = f" [fonte: {fonte}]" if fonte and fonte != "ia" else ""
                         relatorio_linhas.append(
-                            f"{novo_nome} | Original: {r['nome_original']} | Data: {r.get('data', 'NAO ENCONTRADA')}"
+                            f"{novo_nome} | Original: {r['nome_original']} | Data: {r.get('data', 'NAO ENCONTRADA')}{fonte_txt}"
                         )
                         lista_docs.append({
                             "ordem": ordem, "nome": novo_nome,
                             "original": r["nome_original"],
                             "tipo": r.get("tipo", "?"), "data": r.get("data"),
+                            "data_fonte": r.get("_data_fonte"),
                         })
                         ordem += 1
                 else:
                     novo_nome = f"{ordem:02d}_{nome_limpo}_{data_str}_{tipo_limpo}{r['extensao']}"
                     zf.write(r["arquivo_tmp"], f"{nome_pasta_zip}/{novo_nome}")
+                    fonte = r.get("_data_fonte")
+                    fonte_txt = f" [fonte: {fonte}]" if fonte and fonte != "ia" else ""
                     relatorio_linhas.append(
-                        f"{novo_nome} | Original: {r['nome_original']} | Tipo: {r.get('tipo', '?')} | Data: {r.get('data', 'NAO ENCONTRADA')}"
+                        f"{novo_nome} | Original: {r['nome_original']} | Tipo: {r.get('tipo', '?')} | Data: {r.get('data', 'NAO ENCONTRADA')}{fonte_txt}"
                     )
                     lista_docs.append({
                         "ordem": ordem, "nome": novo_nome,
                         "original": r["nome_original"],
                         "tipo": r.get("tipo", "?"), "data": r.get("data"),
+                        "data_fonte": r.get("_data_fonte"),
                     })
                     ordem += 1
 
