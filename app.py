@@ -192,6 +192,136 @@ Se nao encontrar data, use "data": null.
 
 CHUNK_SIZE_PAGINAS = 8  # paginas por chunk para PDFs grandes
 
+# Categorias que passam por DUPLA CHECAGEM (#3.2): 2a chamada da IA
+# pra confirmar a classificacao. Aplicada em tipos onde erro tem alto custo
+# (procuracao, declaracoes, contratos, decisoes do INSS).
+TIPOS_DUPLA_CHECAGEM = {
+    "procuracao",
+    "substabelecimento",
+    "termo_de_responsabilidade",
+    "protocolo_assinatura",
+    "declaracao",
+    "declaracao_hipossuficiencia",
+    "declaracao_beneficios_inss",
+    "contrato_de_honorarios",
+    "carta_indeferimento",
+    "cnis",
+}
+
+PROMPT_DUPLA_CHECAGEM = """Voce esta validando a classificacao de um documento juridico brasileiro.
+Outra IA classificou este documento como: "{tipo_sugerido}"
+
+Sua tarefa: olhar o conteudo e decidir se a classificacao esta CORRETA ou se deveria ser OUTRA.
+
+Tipos validos (use EXATAMENTE um destes):
+Procuracao, Substabelecimento, Termo de Representacao, Termo de Responsabilidade,
+Protocolo de Assinatura, Relatorio de Assinaturas, Declaracao de Hipossuficiencia,
+Declaracao de Residencia, Declaracao de Beneficios INSS, Declaracao,
+Contrato de Honorarios, RG, CPF, CNH, CNIS, CTPS, Comunicacao de Decisao,
+Carta Indeferimento INSS, Atestado Medico, Relatorio Medico, Receita Medica,
+Exame Medico, Laudo Medico, Pericia Medica, Comprovante Residencia, Comprovante Gasto,
+Foto Residencia, PPP, LTCAT, GPS, Print TRF, Protocolo de Requerimento INSS, desconhecido
+
+REGRAS DE DESEMPATE:
+- "Declaracao de Beneficios INSS" e DOCUMENTO DO INSS (vem do MeuINSS, lista beneficios)
+- "Declaracao de Hipossuficiencia" e DO CLIENTE (declara pobreza)
+- "Comunicacao de Decisao" e DO INSS (informa NEGADO/CONCEDIDO)
+- "Carta Indeferimento INSS" e DO INSS (informa indeferimento)
+- "Relatorio de Assinaturas" e do ZapSign/DocuSign (lista quem assinou)
+- "Protocolo de Assinatura" tambem e do servico de assinatura digital
+
+Responda APENAS em JSON valido, sem markdown:
+{{"tipo_correto": "...", "concorda": true/false, "razao": "breve justificativa em 1 frase"}}
+"""
+
+
+def eh_tipo_critico(tipo_str):
+    """Verifica se um tipo precisa de dupla checagem."""
+    fake_doc = {"tipo": tipo_str}
+    cat = classificar_doc(fake_doc, "inss_admin")  # tipo_processo nao importa pra detectar critico
+    return cat in TIPOS_DUPLA_CHECAGEM
+
+
+def dupla_checagem_doc(client, doc, max_chars=2000):
+    """Para tipos criticos, faz 2a chamada da IA pra confirmar classificacao.
+    Adiciona 2 campos ao doc (in-place):
+      - _confianca: "alta" se concordou, "media" se divergiu, None se nao foi checado
+      - _tipo_alternativo: tipo sugerido pela 2a IA (so se divergiu)
+    Mantem o tipo original no doc — usuario decide na tela de revisao se quer trocar.
+    """
+    tipo_atual = doc.get("tipo", "")
+    if not eh_tipo_critico(tipo_atual):
+        return  # nao e critico, nao precisa
+
+    arquivo = doc.get("arquivo_tmp")
+    if not arquivo or not os.path.exists(arquivo):
+        return
+
+    ext = Path(arquivo).suffix.lower()
+    content_msg = []
+
+    try:
+        if ext == ".pdf":
+            # Tenta texto da pagina 1; se vazio, usa imagem
+            import pdfplumber
+            with pdfplumber.open(arquivo) as pdf:
+                if pdf.pages:
+                    texto = (pdf.pages[0].extract_text() or "").strip()
+                else:
+                    texto = ""
+            if texto:
+                content_msg.append({"type": "text", "text": texto[:max_chars]})
+            else:
+                img_b64 = pagina_para_imagem_b64(arquivo, 1)
+                if img_b64:
+                    content_msg.append({
+                        "type": "image",
+                        "source": {"type": "base64", "media_type": "image/jpeg", "data": img_b64},
+                    })
+        elif ext in (".jpg", ".jpeg", ".png"):
+            with open(arquivo, "rb") as f:
+                img_b64 = base64.b64encode(f.read()).decode()
+            content_msg.append({
+                "type": "image",
+                "source": {"type": "base64", "media_type": "image/jpeg", "data": img_b64},
+            })
+        elif ext == ".docx":
+            from docx import Document
+            d = Document(arquivo)
+            texto = "\n".join(p.text for p in d.paragraphs if p.text.strip())[:max_chars]
+            if texto:
+                content_msg.append({"type": "text", "text": texto})
+    except Exception:
+        return  # se falhou em ler, deixa sem checagem
+
+    if not content_msg:
+        return
+
+    prompt = PROMPT_DUPLA_CHECAGEM.format(tipo_sugerido=tipo_atual)
+    content_msg.append({"type": "text", "text": prompt})
+
+    try:
+        response = client.messages.create(
+            model=MODELO_IA,
+            max_tokens=200,
+            messages=[{"role": "user", "content": content_msg}],
+        )
+        dados = _parse_json_response(response.content[0].text)
+        tipo_correto = (dados.get("tipo_correto") or "").strip()
+        concorda = dados.get("concorda", True)
+
+        if not tipo_correto:
+            return  # resposta invalida — ignora
+        # Compara case-insensitive (mas mantem o original)
+        if concorda or tipo_correto.lower() == tipo_atual.lower():
+            doc["_confianca"] = "alta"
+        else:
+            doc["_confianca"] = "media"
+            doc["_tipo_alternativo"] = tipo_correto
+            doc["_razao_dupla_checagem"] = (dados.get("razao") or "")[:200]
+    except Exception:
+        pass  # se falhar, nao bloqueia o fluxo
+
 # Sequencia para INSS Administrativo
 # REGRA (definida pelo time Jaine/Andre):
 # - grupo_procuracao_termos = procuracao + substabelecimento + termo_representacao + protocolo
@@ -1445,6 +1575,22 @@ def processar_stream():
                     registrar_erro(usuario, nome_cliente, tipo_processo, nome_original,
                                   "excecao_processamento_arquivo", e)
 
+            # ===== ETAPA: DUPLA CHECAGEM DE DOCS CRITICOS (#3.2) =====
+            # 2a chamada da IA pra confirmar classificacao de procuracoes,
+            # declaracoes, contratos, decisoes INSS — tipos onde erro tem custo alto
+            criticos = [r for r in resultados if eh_tipo_critico(r.get("tipo", ""))]
+            if criticos:
+                yield _sse({
+                    "tipo": "progresso",
+                    "etapa": f"Validando {len(criticos)} documento(s) critico(s)...",
+                    "percent": 62,
+                })
+                for idx, doc in enumerate(criticos):
+                    try:
+                        dupla_checagem_doc(client, doc)
+                    except Exception:
+                        pass
+
             # ===== ETAPA 1: Anexar protocolos =====
             yield _sse({"tipo": "progresso", "etapa": "Agrupando protocolos de assinatura...", "percent": 65})
             resultados_processados = []
@@ -1841,6 +1987,10 @@ def salvar_sessao(session_id, contexto, docs):
             "nome_original": doc.get("nome_original", ""),
             "aviso": doc.get("_aviso"),
             "extensao": ext,
+            # Dupla checagem (#3.2)
+            "confianca": doc.get("_confianca"),  # "alta" | "media" | None
+            "tipo_alternativo": doc.get("_tipo_alternativo"),
+            "razao_dupla_checagem": doc.get("_razao_dupla_checagem"),
         })
 
     metadata = {

@@ -473,6 +473,33 @@
             color: var(--amarelo);
             font-weight: 600;
         }
+        .doc-edit-confianca {
+            font-size: 11px;
+            font-weight: 600;
+            padding: 4px 8px;
+            border-radius: 4px;
+            display: inline-block;
+        }
+        .doc-edit-confianca.alta {
+            background: #c6f6d5;
+            color: #22543d;
+        }
+        .doc-edit-confianca.media {
+            background: #fefcbf;
+            color: #744210;
+            border: 1px solid #ecc94b;
+        }
+        .doc-edit-suggestion {
+            font-size: 11px;
+            color: #744210;
+            background: #fffbeb;
+            padding: 6px 8px;
+            border-radius: 4px;
+            border-left: 3px solid var(--amarelo);
+        }
+        .doc-edit.divergencia {
+            border-left: 3px solid var(--amarelo);
+        }
 
         /* ERRO */
         .erro {
@@ -822,7 +849,10 @@
         lista.innerHTML = '';
         docsRevisao.forEach((doc, idx) => {
             const div = document.createElement('div');
-            div.className = 'doc-edit' + (doc.deletar ? ' deletado' : '');
+            const temDivergencia = doc.confianca === 'media';
+            div.className = 'doc-edit'
+                + (doc.deletar ? ' deletado' : '')
+                + (temDivergencia ? ' divergencia' : '');
 
             // Dropdown de tipos
             const selectOptions = TIPOS_DOCUMENTOS.map(t => {
@@ -841,10 +871,32 @@
                 ? `<div class="doc-edit-fonte">⚠ Data extraida via ${doc.data_fonte} — verifique</div>`
                 : '';
 
+            // Badge de confianca + sugestao alternativa (#3.2 dupla checagem)
+            let confiancaTxt = '';
+            if (doc.confianca === 'alta') {
+                confiancaTxt = `<span class="doc-edit-confianca alta">✓ Confianca alta</span>`;
+            } else if (doc.confianca === 'media') {
+                confiancaTxt = `<span class="doc-edit-confianca media">⚠ Verificar</span>`;
+            }
+
+            let sugestaoTxt = '';
+            if (doc.tipo_alternativo && doc.tipo_alternativo.toLowerCase() !== (doc.tipo || '').toLowerCase()) {
+                const razao = doc.razao_dupla_checagem ? ` — ${doc.razao_dupla_checagem}` : '';
+                sugestaoTxt = `<div class="doc-edit-suggestion">
+                    💡 Outra IA sugere: <strong>${doc.tipo_alternativo}</strong>${razao}
+                    <button data-idx="${idx}" data-tipo="${doc.tipo_alternativo}" class="btn-aceitar-sugestao" style="
+                        margin-left: 8px; background: var(--amarelo); border: none;
+                        padding: 2px 8px; border-radius: 4px; font-size: 10px; cursor: pointer; font-weight: 700;">
+                        Aceitar sugestao
+                    </button>
+                </div>`;
+            }
+
             div.innerHTML = `
                 <div class="doc-edit-head">
                     <div class="doc-edit-num">${idx + 1}</div>
                     <div class="doc-edit-orig">${doc.nome_original || ''}</div>
+                    ${confiancaTxt}
                     <button class="doc-edit-del${doc.deletar ? ' ativo' : ''}" data-idx="${idx}">
                         ${doc.deletar ? 'Desfazer' : '🗑 Apagar'}
                     </button>
@@ -862,9 +914,23 @@
                         <input type="date" data-idx="${idx}" data-field="data" value="${doc.data || ''}">
                     </div>
                 </div>
+                ${sugestaoTxt}
                 ${fonteTxt}
             `;
             lista.appendChild(div);
+        });
+
+        // Botao "Aceitar sugestao" troca o tipo pelo alternativo
+        lista.querySelectorAll('.btn-aceitar-sugestao').forEach(btn => {
+            btn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                const i = parseInt(btn.dataset.idx);
+                const novoTipo = btn.dataset.tipo;
+                docsRevisao[i].tipo = novoTipo;
+                docsRevisao[i].confianca = 'alta';  // resolvido
+                docsRevisao[i].tipo_alternativo = null;
+                renderizarRevisao();
+            });
         });
 
         // Listeners
