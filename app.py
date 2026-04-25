@@ -65,6 +65,12 @@ USUARIOS = [
 # Webhook para registrar uso e erros (mesma planilha, diferenciado pelo prefixo no status)
 LOG_WEBHOOK_URL = os.environ.get("LOG_WEBHOOK_URL", "")
 
+# Dashboard admin (#5.4) — Andre + Dra. Luana
+ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "abgroup2026")  # default p/ dev — sobrescrever em prod
+SPREADSHEET_ID = "182DGXAm25l1AVfgdA6uDxU4BvpWAxA7GxWQLKRlsVIc"  # planilha de logs
+# URL publica da planilha em CSV (requer planilha "qualquer pessoa com link pode ver")
+SPREADSHEET_CSV_URL = f"https://docs.google.com/spreadsheets/d/{SPREADSHEET_ID}/gviz/tq?tqx=out:csv"
+
 PROMPT_MAPEAMENTO = """Analise o texto de cada pagina deste PDF juridico brasileiro.
 Identifique TODOS os documentos separados que existem dentro deste arquivo.
 
@@ -2242,6 +2248,137 @@ def montar_zip_final(contexto, docs_editados, sess_dir, tmp_dir):
         "sem_data": sum(1 for r in docs_ativos if not r.get("data")),
         "avisos": avisos_relatorio,
     }
+
+
+# ============ DASHBOARD ADMIN (#5.4) ============
+
+def _ler_planilha_csv():
+    """Le a planilha de logs publica e retorna lista de dicts.
+    Cabecalho esperado: timestamp, usuario, cliente, tipo_processo, total_documentos, status
+    """
+    try:
+        import urllib.request
+        import csv
+        import io as iolib
+        req = urllib.request.Request(SPREADSHEET_CSV_URL, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            raw = resp.read().decode("utf-8")
+        leitor = csv.DictReader(iolib.StringIO(raw))
+        return list(leitor)
+    except Exception as e:
+        return [{"_erro": str(e)}]
+
+
+def _calcular_metricas(linhas):
+    """Calcula metricas para o dashboard a partir das linhas da planilha."""
+    if linhas and "_erro" in linhas[0]:
+        return {"erro": linhas[0]["_erro"]}
+
+    from collections import Counter
+    from datetime import timedelta
+
+    total = len(linhas)
+    sucessos = sum(1 for l in linhas if (l.get("status") or "").lower() == "sucesso")
+    erros = total - sucessos
+
+    # Mes atual
+    hoje = datetime.now()
+    mes_atual_str = hoje.strftime("%Y-%m")
+    mes_anterior_str = (hoje.replace(day=1) - timedelta(days=1)).strftime("%Y-%m")
+
+    casos_mes_atual = sum(
+        1 for l in linhas
+        if (l.get("timestamp") or "").startswith(mes_atual_str)
+        and (l.get("status") or "").lower() == "sucesso"
+    )
+    casos_mes_anterior = sum(
+        1 for l in linhas
+        if (l.get("timestamp") or "").startswith(mes_anterior_str)
+        and (l.get("status") or "").lower() == "sucesso"
+    )
+
+    # Por usuario
+    por_usuario = Counter()
+    for l in linhas:
+        if (l.get("status") or "").lower() == "sucesso":
+            por_usuario[l.get("usuario") or "desconhecido"] += 1
+
+    # Por tipo de processo
+    por_tipo = Counter()
+    for l in linhas:
+        if (l.get("status") or "").lower() == "sucesso":
+            por_tipo[l.get("tipo_processo") or "desconhecido"] += 1
+
+    # Erros recentes (ultimos 20)
+    erros_lista = [
+        l for l in linhas
+        if (l.get("status") or "").startswith("ERRO[") or (l.get("status") or "").startswith("erro:")
+    ]
+    erros_lista.sort(key=lambda l: l.get("timestamp") or "", reverse=True)
+    erros_recentes = erros_lista[:20]
+
+    # Total de documentos processados (soma do campo)
+    total_docs = 0
+    for l in linhas:
+        if (l.get("status") or "").lower() == "sucesso":
+            try:
+                total_docs += int(l.get("total_documentos") or 0)
+            except (ValueError, TypeError):
+                pass
+
+    # Custo estimado: ~R$ 0.05 por caso (Haiku + dupla checagem)
+    custo_estimado = round(sucessos * 0.05, 2)
+    custo_mes_atual = round(casos_mes_atual * 0.05, 2)
+
+    return {
+        "total_casos": total,
+        "sucessos": sucessos,
+        "erros": erros,
+        "taxa_sucesso": round(sucessos / total * 100, 1) if total else 0,
+        "casos_mes_atual": casos_mes_atual,
+        "casos_mes_anterior": casos_mes_anterior,
+        "por_usuario": por_usuario.most_common(),
+        "por_tipo": por_tipo.most_common(),
+        "erros_recentes": erros_recentes,
+        "total_documentos": total_docs,
+        "custo_estimado_total": custo_estimado,
+        "custo_estimado_mes": custo_mes_atual,
+        "atualizado_em": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    }
+
+
+def _check_auth(auth):
+    """HTTP Basic Auth: aceita qualquer username, senha em ADMIN_PASSWORD."""
+    return auth and auth.password == ADMIN_PASSWORD
+
+
+def _auth_required():
+    return Response(
+        "Acesso restrito. Login necessario.\n",
+        401,
+        {"WWW-Authenticate": 'Basic realm="Admin Dashboard"'},
+    )
+
+
+@app.route("/admin")
+def admin_dashboard():
+    auth = request.authorization
+    if not _check_auth(auth):
+        return _auth_required()
+
+    linhas = _ler_planilha_csv()
+    metricas = _calcular_metricas(linhas)
+    return render_template("admin.html", m=metricas)
+
+
+@app.route("/admin/api/metricas")
+def admin_api_metricas():
+    """Endpoint JSON pras metricas (usado pelo dashboard pra refresh sem recarregar a pagina)."""
+    auth = request.authorization
+    if not _check_auth(auth):
+        return _auth_required()
+    linhas = _ler_planilha_csv()
+    return jsonify(_calcular_metricas(linhas))
 
 
 if __name__ == "__main__":

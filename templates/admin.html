@@ -1,0 +1,304 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dashboard Admin — AB Group</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        :root {
+            --azul: #1a3a5c;
+            --azul-claro: #2c5282;
+            --verde: #38a169;
+            --verde-claro: #48bb78;
+            --cinza-bg: #f7fafc;
+            --cinza-borda: #e2e8f0;
+            --cinza-texto: #4a5568;
+            --vermelho: #e53e3e;
+            --amarelo: #ecc94b;
+            --branco: #ffffff;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: var(--cinza-bg);
+            color: #2d3748;
+            min-height: 100vh;
+        }
+        .header {
+            background: linear-gradient(135deg, var(--azul) 0%, var(--azul-claro) 100%);
+            color: white;
+            padding: 20px 24px;
+            box-shadow: 0 2px 12px rgba(0,0,0,0.15);
+        }
+        .header h1 { font-size: 22px; }
+        .header .subtitle { font-size: 13px; opacity: 0.85; margin-top: 4px; }
+        .header .btn-refresh {
+            position: absolute; top: 24px; right: 24px;
+            background: rgba(255,255,255,0.2); border: 1px solid rgba(255,255,255,0.3);
+            color: white; padding: 8px 16px; border-radius: 8px; cursor: pointer; font-size: 13px;
+        }
+        .header .btn-refresh:hover { background: rgba(255,255,255,0.3); }
+        .container {
+            max-width: 1200px; margin: 0 auto; padding: 24px;
+        }
+        .grid-cards {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+            gap: 16px;
+            margin-bottom: 32px;
+        }
+        .card-metric {
+            background: var(--branco);
+            border-radius: 12px;
+            padding: 20px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.05);
+            border-top: 3px solid var(--azul);
+        }
+        .card-metric.verde { border-top-color: var(--verde); }
+        .card-metric.amarelo { border-top-color: var(--amarelo); }
+        .card-metric.vermelho { border-top-color: var(--vermelho); }
+        .card-metric .label {
+            font-size: 11px;
+            text-transform: uppercase;
+            letter-spacing: 0.8px;
+            color: #a0aec0;
+            margin-bottom: 8px;
+            font-weight: 600;
+        }
+        .card-metric .value {
+            font-size: 36px;
+            font-weight: 700;
+            color: var(--azul);
+            line-height: 1;
+        }
+        .card-metric .sub {
+            font-size: 12px; color: var(--cinza-texto);
+            margin-top: 6px;
+        }
+        .card-metric .sub.up { color: var(--verde); }
+        .card-metric .sub.down { color: var(--vermelho); }
+
+        .section {
+            background: var(--branco);
+            border-radius: 12px;
+            padding: 20px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.05);
+            margin-bottom: 24px;
+        }
+        .section h2 {
+            font-size: 16px;
+            font-weight: 700;
+            color: var(--azul);
+            margin-bottom: 16px;
+            padding-bottom: 12px;
+            border-bottom: 1px solid var(--cinza-borda);
+        }
+        table { width: 100%; border-collapse: collapse; }
+        th, td {
+            text-align: left;
+            padding: 10px 8px;
+            font-size: 13px;
+            border-bottom: 1px solid var(--cinza-borda);
+        }
+        th {
+            font-size: 11px;
+            text-transform: uppercase;
+            color: #a0aec0;
+            letter-spacing: 0.6px;
+            font-weight: 700;
+        }
+        tr:hover td { background: var(--cinza-bg); }
+        .barra-pct {
+            display: flex; align-items: center; gap: 8px;
+        }
+        .barra-fill {
+            background: var(--cinza-borda);
+            height: 6px; border-radius: 3px; flex: 1; overflow: hidden;
+        }
+        .barra-fill > div {
+            height: 100%;
+            background: linear-gradient(90deg, var(--azul-claro), var(--verde));
+        }
+        .erro-row { background: #fff5f5; }
+        .erro-row td { color: #742a2a; font-family: 'Monaco', monospace; font-size: 11px; }
+        .empty {
+            text-align: center;
+            color: #a0aec0;
+            padding: 30px;
+            font-size: 13px;
+        }
+        .footer-note {
+            text-align: center;
+            font-size: 11px;
+            color: #a0aec0;
+            margin-top: 24px;
+            padding: 16px;
+        }
+    </style>
+</head>
+<body>
+<div class="header" style="position:relative;">
+    <h1>Dashboard Admin — Organizador AB Group</h1>
+    <div class="subtitle">
+        Métricas de uso e qualidade — atualizado em {{ m.atualizado_em }}
+    </div>
+    <button class="btn-refresh" onclick="location.reload()">↻ Atualizar</button>
+</div>
+
+<div class="container">
+
+{% if m.erro %}
+    <div class="section">
+        <h2>⚠ Erro ao carregar dados</h2>
+        <p style="color: var(--vermelho);">{{ m.erro }}</p>
+        <p style="margin-top: 12px; font-size: 12px; color: var(--cinza-texto);">
+            Possíveis causas: planilha não está pública, ID errado, ou rede indisponível.
+            <br>Verifique se a planilha está compartilhada como "qualquer pessoa com o link pode ver".
+        </p>
+    </div>
+{% else %}
+
+    <!-- CARDS DE MÉTRICAS PRINCIPAIS -->
+    <div class="grid-cards">
+        <div class="card-metric verde">
+            <div class="label">Casos no mês atual</div>
+            <div class="value">{{ m.casos_mes_atual }}</div>
+            {% if m.casos_mes_anterior %}
+                {% set diff = m.casos_mes_atual - m.casos_mes_anterior %}
+                <div class="sub {% if diff >= 0 %}up{% else %}down{% endif %}">
+                    {% if diff >= 0 %}↑{% else %}↓{% endif %} {{ diff|abs }} vs mês anterior ({{ m.casos_mes_anterior }})
+                </div>
+            {% else %}
+                <div class="sub">primeiro mês de uso</div>
+            {% endif %}
+        </div>
+
+        <div class="card-metric">
+            <div class="label">Total de casos processados</div>
+            <div class="value">{{ m.sucessos }}</div>
+            <div class="sub">desde o lançamento</div>
+        </div>
+
+        <div class="card-metric">
+            <div class="label">Documentos analisados</div>
+            <div class="value">{{ m.total_documentos }}</div>
+            <div class="sub">somatório de todos os casos</div>
+        </div>
+
+        <div class="card-metric {% if m.taxa_sucesso < 90 %}amarelo{% else %}verde{% endif %}">
+            <div class="label">Taxa de sucesso</div>
+            <div class="value">{{ m.taxa_sucesso }}%</div>
+            <div class="sub">{{ m.sucessos }} sucessos / {{ m.erros }} erros</div>
+        </div>
+
+        <div class="card-metric">
+            <div class="label">Custo estimado (mês)</div>
+            <div class="value">R$ {{ "%.2f"|format(m.custo_estimado_mes) }}</div>
+            <div class="sub">total acumulado: R$ {{ "%.2f"|format(m.custo_estimado_total) }}</div>
+        </div>
+
+        <div class="card-metric {% if m.erros > 0 %}vermelho{% endif %}">
+            <div class="label">Erros recentes</div>
+            <div class="value">{{ m.erros_recentes|length }}</div>
+            <div class="sub">{{ "ver detalhes abaixo" if m.erros_recentes else "nenhum erro" }}</div>
+        </div>
+    </div>
+
+    <!-- USUÁRIOS -->
+    <div class="section">
+        <h2>Casos por colaborador</h2>
+        {% if m.por_usuario %}
+            <table>
+                <thead>
+                    <tr><th>Colaborador</th><th>Casos</th><th>% do total</th></tr>
+                </thead>
+                <tbody>
+                    {% for usuario, qtd in m.por_usuario %}
+                    <tr>
+                        <td>{{ usuario }}</td>
+                        <td><strong>{{ qtd }}</strong></td>
+                        <td>
+                            <div class="barra-pct">
+                                <div class="barra-fill">
+                                    <div style="width: {{ (qtd / m.sucessos * 100) if m.sucessos else 0 }}%;"></div>
+                                </div>
+                                <span>{{ "%.1f"|format((qtd / m.sucessos * 100) if m.sucessos else 0) }}%</span>
+                            </div>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        {% else %}
+            <div class="empty">Sem dados ainda.</div>
+        {% endif %}
+    </div>
+
+    <!-- TIPOS DE PROCESSO -->
+    <div class="section">
+        <h2>Casos por tipo de processo</h2>
+        {% if m.por_tipo %}
+            <table>
+                <thead>
+                    <tr><th>Tipo de processo</th><th>Casos</th><th>% do total</th></tr>
+                </thead>
+                <tbody>
+                    {% for tipo, qtd in m.por_tipo %}
+                    <tr>
+                        <td>{{ tipo }}</td>
+                        <td><strong>{{ qtd }}</strong></td>
+                        <td>
+                            <div class="barra-pct">
+                                <div class="barra-fill">
+                                    <div style="width: {{ (qtd / m.sucessos * 100) if m.sucessos else 0 }}%;"></div>
+                                </div>
+                                <span>{{ "%.1f"|format((qtd / m.sucessos * 100) if m.sucessos else 0) }}%</span>
+                            </div>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        {% else %}
+            <div class="empty">Sem dados ainda.</div>
+        {% endif %}
+    </div>
+
+    <!-- ERROS RECENTES -->
+    <div class="section">
+        <h2>⚠ Erros recentes (últimos 20)</h2>
+        {% if m.erros_recentes %}
+            <table>
+                <thead>
+                    <tr>
+                        <th>Quando</th>
+                        <th>Colaborador</th>
+                        <th>Cliente</th>
+                        <th>Tipo de erro</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for e in m.erros_recentes %}
+                    <tr class="erro-row">
+                        <td>{{ e.timestamp }}</td>
+                        <td>{{ e.usuario }}</td>
+                        <td>{{ e.cliente }}</td>
+                        <td>{{ e.status }}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        {% else %}
+            <div class="empty">🎉 Nenhum erro registrado.</div>
+        {% endif %}
+    </div>
+
+{% endif %}
+
+    <div class="footer-note">
+        Dashboard restrito a CEO e C-Level Operação.<br>
+        Dados extraídos da planilha de logs em tempo real.
+    </div>
+</div>
+</body>
+</html>
