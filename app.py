@@ -241,6 +241,87 @@ Responda APENAS em JSON valido, sem markdown:
 """
 
 
+def hash_arquivo_binario(caminho):
+    """Hash SHA256 do binario completo. Detecta duplicatas EXATAS."""
+    import hashlib
+    h = hashlib.sha256()
+    try:
+        with open(caminho, "rb") as f:
+            for chunk in iter(lambda: f.read(8192), b""):
+                h.update(chunk)
+        return h.hexdigest()
+    except Exception:
+        return None
+
+
+def hash_conteudo_pdf(caminho):
+    """Hash do TEXTO extraido (primeiras 3 paginas). Detecta duplicatas com
+    pequenas diferencas de metadata/timestamps."""
+    try:
+        import hashlib
+        import pdfplumber
+        textos = []
+        with pdfplumber.open(caminho) as pdf:
+            for p in pdf.pages[:3]:
+                t = p.extract_text() or ""
+                # Normaliza: remove whitespace, lowercase
+                t = " ".join(t.split()).lower()
+                textos.append(t)
+        texto_total = " ".join(textos)
+        if len(texto_total) < 50:  # texto muito curto, nao confiavel
+            return None
+        return hashlib.sha256(texto_total.encode("utf-8")).hexdigest()
+    except Exception:
+        return None
+
+
+def detectar_duplicatas(docs):
+    """Marca duplicatas no doc com:
+      - _duplicata: True se for duplicata
+      - _duplicata_de: id (indice) do doc original
+      - _motivo_duplicata: 'arquivo_identico' | 'mesmo_conteudo'
+    A duplicata fica marcada pra ser ignorada (deletar=True por padrao na revisao).
+    Retorna numero de duplicatas detectadas.
+    """
+    seen_bin = {}    # hash_bin -> indice do primeiro doc
+    seen_txt = {}    # hash_txt -> indice do primeiro doc
+    duplicatas = 0
+
+    for i, doc in enumerate(docs):
+        arq = doc.get("arquivo_tmp")
+        if not arq or not os.path.exists(arq):
+            continue
+
+        h_bin = hash_arquivo_binario(arq)
+        h_txt = None
+        if Path(arq).suffix.lower() == ".pdf":
+            h_txt = hash_conteudo_pdf(arq)
+
+        # Hash binario igual = duplicata exata
+        if h_bin and h_bin in seen_bin:
+            doc["_duplicata"] = True
+            doc["_duplicata_de"] = seen_bin[h_bin]
+            doc["_motivo_duplicata"] = "arquivo_identico"
+            duplicatas += 1
+            continue
+
+        # Hash texto igual = mesmo conteudo (com diferencas minimas)
+        if h_txt and h_txt in seen_txt:
+            doc["_duplicata"] = True
+            doc["_duplicata_de"] = seen_txt[h_txt]
+            doc["_motivo_duplicata"] = "mesmo_conteudo"
+            duplicatas += 1
+            continue
+
+        # Nao e duplicata — registra
+        if h_bin:
+            seen_bin[h_bin] = i
+        if h_txt:
+            seen_txt[h_txt] = i
+
+    return duplicatas
+
+
 def eh_tipo_critico(tipo_str):
     """Verifica se um tipo precisa de dupla checagem."""
     fake_doc = {"tipo": tipo_str}
@@ -1597,11 +1678,22 @@ def processar_stream():
                     except Exception:
                         pass
 
+            # ===== ETAPA: DETECTAR DUPLICATAS (#3.4) =====
+            yield _sse({"tipo": "progresso", "etapa": "Detectando duplicatas...", "percent": 64})
+            num_dup = detectar_duplicatas(resultados)
+            if num_dup > 0:
+                # Filtra duplicatas do fluxo direto (nao vao pro ZIP montado automaticamente)
+                # Mas continuam disponiveis na sessao pra usuario ver na revisao
+                resultados_sem_dup = [r for r in resultados if not r.get("_duplicata")]
+            else:
+                resultados_sem_dup = resultados
+            # IMPORTANTE: usamos resultados_sem_dup pro ZIP "direto", e resultados completos pra sessao
+
             # ===== ETAPA 1: Anexar protocolos =====
             yield _sse({"tipo": "progresso", "etapa": "Agrupando protocolos de assinatura...", "percent": 65})
             resultados_processados = []
             protocolos_pendentes = []
-            for r in resultados:
+            for r in resultados_sem_dup:
                 if eh_protocolo_assinatura(r) and tipo_processo != "inss_admin":
                     if resultados_processados:
                         ultimo = resultados_processados[-1]
@@ -1997,6 +2089,10 @@ def salvar_sessao(session_id, contexto, docs):
             "confianca": doc.get("_confianca"),  # "alta" | "media" | None
             "tipo_alternativo": doc.get("_tipo_alternativo"),
             "razao_dupla_checagem": doc.get("_razao_dupla_checagem"),
+            # Duplicatas (#3.4)
+            "duplicata": doc.get("_duplicata", False),
+            "duplicata_de": doc.get("_duplicata_de"),
+            "motivo_duplicata": doc.get("_motivo_duplicata"),
         })
 
     metadata = {
