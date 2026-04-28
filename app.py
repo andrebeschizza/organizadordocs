@@ -8,16 +8,27 @@ Separa automaticamente PDFs com multiplos documentos em arquivos individuais.
 import os
 import io
 import re
+import sys
 import json
 import uuid
 import time
 import base64
 import shutil
+import logging
 import zipfile
 import tempfile
 import unicodedata
 from pathlib import Path
 from datetime import datetime
+
+# Logging persistente em stdout — Render captura e mantem por 7 dias.
+# Pode ser auditado via Render Dashboard > Logs sempre que precisar.
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s | %(levelname)s | %(message)s',
+    handlers=[logging.StreamHandler(sys.stdout)],
+)
+audit_log = logging.getLogger("audit")
 
 from flask import Flask, render_template, request, jsonify, send_file, Response, stream_with_context
 
@@ -1221,7 +1232,19 @@ def index():
 def registrar_uso(usuario, nome_cliente, tipo_processo, total_docs, status):
     """Envia log de uso/erro para webhook (n8n -> Google Sheets).
     Erros sao diferenciados pelo prefixo 'ERRO[tipo_erro]' no campo status.
+    Tambem loga em stdout (Render captura por 7 dias) pra ter persistencia mesmo se o n8n falhar.
     """
+    # 1) LOG LOCAL (stdout — Render captura) — funciona sempre, ate sem webhook
+    audit_log.info(
+        "USO | usuario=%s | cliente=%s | tipo=%s | docs=%s | status=%s",
+        usuario or "desconhecido",
+        nome_cliente or "",
+        TIPOS_PROCESSO.get(tipo_processo, tipo_processo or ""),
+        total_docs,
+        status,
+    )
+
+    # 2) WEBHOOK (n8n -> Google Sheets) — pode falhar silenciosamente
     if not LOG_WEBHOOK_URL:
         return
     try:
@@ -1247,13 +1270,24 @@ def registrar_uso(usuario, nome_cliente, tipo_processo, total_docs, status):
 
 def registrar_erro(usuario, nome_cliente, tipo_processo, arquivo, tipo_erro, mensagem):
     """Registra um erro na MESMA planilha de uso, com prefixo ERRO[tipo_erro].
-    Assim nao precisa de aba separada nem workflow diferente no n8n - o Andre
-    pode filtrar por 'status CONTEM ERRO[' pra ver so os erros.
+    Tambem loga em stdout pra auditoria local (Render captura por 7 dias).
     """
-    msg_limpa = str(mensagem)[:200].replace("\n", " ").replace("|", "/")
+    msg_limpa = str(mensagem)[:300].replace("\n", " ").replace("|", "/")
     arq = arquivo or "-"
+
+    # LOG LOCAL detalhado (separado do registrar_uso pra ter mais info no log)
+    audit_log.error(
+        "ERRO[%s] | usuario=%s | cliente=%s | tipo=%s | arquivo=%s | msg=%s",
+        tipo_erro,
+        usuario or "desconhecido",
+        nome_cliente or "",
+        TIPOS_PROCESSO.get(tipo_processo, tipo_processo or ""),
+        arq,
+        msg_limpa,
+    )
+
+    # Tambem escreve na planilha (via webhook) — pode falhar silenciosamente
     status_codificado = f"ERRO[{tipo_erro}] {arq}: {msg_limpa}"
-    # Usa a mesma funcao registrar_uso — cai na mesma aba, mesmo formato
     registrar_uso(usuario, nome_cliente, tipo_processo, 0, status_codificado)
 
 
@@ -1630,6 +1664,14 @@ def processar_stream():
         tmp_path = os.path.join(tmp_dir, nome_original)
         arquivo.save(tmp_path)
         arquivos_para_processar.append((nome_original, tmp_path, ext))
+
+    # Log de inicio de processamento (auditoria)
+    audit_log.info(
+        "INICIO | usuario=%s | cliente=%s | tipo=%s | arquivos=%d | nomes=%s",
+        usuario, nome_cliente, tipo_processo,
+        len(arquivos_para_processar),
+        ",".join(a[0] for a in arquivos_para_processar)[:500],
+    )
 
     @stream_with_context
     def gerar():
