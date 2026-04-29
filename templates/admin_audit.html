@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Auditoria Local — AB Group</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        :root {
+            --azul: #1a3a5c;
+            --azul-claro: #2c5282;
+            --verde: #38a169;
+            --cinza-bg: #f7fafc;
+            --cinza-borda: #e2e8f0;
+            --cinza-texto: #4a5568;
+            --vermelho: #e53e3e;
+            --amarelo: #ecc94b;
+            --branco: #ffffff;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: var(--cinza-bg);
+            color: #2d3748;
+            min-height: 100vh;
+        }
+        .header {
+            background: linear-gradient(135deg, var(--azul) 0%, var(--azul-claro) 100%);
+            color: white;
+            padding: 20px 24px;
+            box-shadow: 0 2px 12px rgba(0,0,0,0.15);
+        }
+        .header h1 { font-size: 22px; }
+        .header .subtitle { font-size: 13px; opacity: 0.85; margin-top: 4px; }
+        .container { max-width: 1400px; margin: 0 auto; padding: 24px; }
+
+        .filtros {
+            background: var(--branco);
+            border-radius: 12px;
+            padding: 16px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.05);
+            display: flex;
+            gap: 12px;
+            flex-wrap: wrap;
+            align-items: end;
+        }
+        .filtros label { font-size: 11px; color: #a0aec0; text-transform: uppercase; letter-spacing: 0.6px; display: block; margin-bottom: 4px; }
+        .filtros input, .filtros select {
+            padding: 8px 12px; font-size: 14px; border: 1px solid var(--cinza-borda); border-radius: 8px; background: var(--cinza-bg); }
+        .filtros button {
+            padding: 9px 18px; background: var(--azul); color: white; border: none; border-radius: 8px;
+            cursor: pointer; font-size: 13px; font-weight: 600;
+        }
+        .filtros a.btn-link {
+            padding: 9px 14px; background: var(--cinza-bg); color: var(--cinza-texto);
+            border: 1px solid var(--cinza-borda); border-radius: 8px;
+            text-decoration: none; font-size: 12px;
+        }
+
+        .resumo {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+            gap: 12px;
+            margin-bottom: 20px;
+        }
+        .resumo-card {
+            background: var(--branco);
+            border-radius: 10px;
+            padding: 14px 16px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.05);
+        }
+        .resumo-card.inicio { border-left: 4px solid var(--azul); }
+        .resumo-card.sucesso { border-left: 4px solid var(--verde); }
+        .resumo-card.erro { border-left: 4px solid var(--vermelho); }
+        .resumo-card .label { font-size: 11px; color: #a0aec0; text-transform: uppercase; letter-spacing: 0.6px; font-weight: 600; }
+        .resumo-card .value { font-size: 28px; font-weight: 700; color: var(--azul); }
+
+        .section {
+            background: var(--branco);
+            border-radius: 12px;
+            padding: 16px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.05);
+        }
+        .section h2 {
+            font-size: 14px;
+            font-weight: 700;
+            color: var(--azul);
+            text-transform: uppercase;
+            letter-spacing: 0.6px;
+            margin-bottom: 12px;
+            padding-bottom: 8px;
+            border-bottom: 1px solid var(--cinza-borda);
+        }
+
+        table { width: 100%; border-collapse: collapse; font-size: 12px; }
+        th, td {
+            text-align: left;
+            padding: 8px 6px;
+            border-bottom: 1px solid var(--cinza-borda);
+            vertical-align: top;
+        }
+        th { font-size: 10px; text-transform: uppercase; color: #a0aec0; letter-spacing: 0.5px; }
+        td.ts { font-family: 'Monaco', monospace; font-size: 11px; white-space: nowrap; }
+        td.evento { font-weight: 600; }
+        tr.evt-INICIO td.evento { color: var(--azul); }
+        tr.evt-SUCESSO td.evento { color: var(--verde); }
+        tr.evt-ERRO td.evento { color: var(--vermelho); }
+        tr.evt-ERRO { background: #fff5f5; }
+        td.msg { font-family: 'Monaco', monospace; font-size: 11px; color: var(--cinza-texto); max-width: 500px; word-break: break-word; }
+        .empty { text-align: center; padding: 30px; color: #a0aec0; }
+
+        .nav-link {
+            color: white;
+            background: rgba(255,255,255,0.2);
+            border: 1px solid rgba(255,255,255,0.3);
+            padding: 6px 12px;
+            border-radius: 6px;
+            text-decoration: none;
+            font-size: 12px;
+            margin-right: 8px;
+        }
+    </style>
+</head>
+<body>
+<div class="header">
+    <h1>Auditoria Local — Logs do Organizador</h1>
+    <div class="subtitle">
+        Dados persistidos localmente no app (SQLite) — independente do n8n/Sheets
+    </div>
+    <div style="margin-top: 12px;">
+        <a href="/admin" class="nav-link">← Dashboard de Métricas</a>
+        <a href="/admin/audit?dias={{ dias }}" class="nav-link">↻ Atualizar</a>
+        <a href="/admin/audit.json?dias={{ dias }}" class="nav-link">📥 JSON</a>
+    </div>
+</div>
+
+<div class="container">
+
+    <!-- FILTROS -->
+    <form class="filtros" method="get">
+        <div>
+            <label>Período</label>
+            <select name="dias">
+                <option value="1" {% if dias == 1 %}selected{% endif %}>Últimas 24h</option>
+                <option value="3" {% if dias == 3 %}selected{% endif %}>Últimos 3 dias</option>
+                <option value="7" {% if dias == 7 %}selected{% endif %}>Últimos 7 dias</option>
+                <option value="30" {% if dias == 30 %}selected{% endif %}>Últimos 30 dias</option>
+            </select>
+        </div>
+        <div>
+            <label>Evento</label>
+            <select name="evento">
+                <option value="">Todos</option>
+                <option value="INICIO" {% if filtro_evento == 'INICIO' %}selected{% endif %}>Início</option>
+                <option value="SUCESSO" {% if filtro_evento == 'SUCESSO' %}selected{% endif %}>Sucesso</option>
+                <option value="ERRO" {% if filtro_evento == 'ERRO' %}selected{% endif %}>Erro</option>
+            </select>
+        </div>
+        <div>
+            <label>Usuário</label>
+            <input type="text" name="usuario" value="{{ filtro_usuario }}" placeholder="ex: Jaíne">
+        </div>
+        <div>
+            <button type="submit">Filtrar</button>
+        </div>
+        <a href="/admin/audit" class="btn-link">Limpar filtros</a>
+    </form>
+
+    <!-- RESUMO -->
+    <div class="resumo">
+        <div class="resumo-card">
+            <div class="label">Total no período</div>
+            <div class="value">{{ total }}</div>
+        </div>
+        <div class="resumo-card inicio">
+            <div class="label">Inícios</div>
+            <div class="value">{{ eventos_count.get('INICIO', 0) }}</div>
+        </div>
+        <div class="resumo-card sucesso">
+            <div class="label">Sucessos</div>
+            <div class="value">{{ eventos_count.get('SUCESSO', 0) }}</div>
+        </div>
+        <div class="resumo-card erro">
+            <div class="label">Erros</div>
+            <div class="value">{{ eventos_count.get('ERRO', 0) }}</div>
+        </div>
+    </div>
+
+    <!-- ERROS POR TIPO -->
+    {% if erros_por_tipo %}
+    <div class="section">
+        <h2>⚠ Erros por tipo</h2>
+        <table>
+            <thead><tr><th>Tipo de erro</th><th>Ocorrências</th></tr></thead>
+            <tbody>
+                {% for tipo, qtd in erros_por_tipo %}
+                <tr><td><code>{{ tipo }}</code></td><td><strong>{{ qtd }}</strong></td></tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% endif %}
+
+    <!-- USUARIOS -->
+    {% if usuarios_count %}
+    <div class="section">
+        <h2>Atividade por colaborador</h2>
+        <table>
+            <thead><tr><th>Colaborador</th><th>Eventos</th></tr></thead>
+            <tbody>
+                {% for u, qtd in usuarios_count %}
+                <tr><td>{{ u }}</td><td><strong>{{ qtd }}</strong></td></tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% endif %}
+
+    <!-- LOG COMPLETO -->
+    <div class="section">
+        <h2>Log completo ({{ registros|length }} registros)</h2>
+        {% if registros %}
+        <table>
+            <thead>
+                <tr>
+                    <th>Quando</th>
+                    <th>Evento</th>
+                    <th>Usuário</th>
+                    <th>Cliente</th>
+                    <th>Tipo Processo</th>
+                    <th>Arquivos / Erro</th>
+                    <th>Detalhes</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for r in registros %}
+                <tr class="evt-{{ r.evento }}">
+                    <td class="ts">{{ r.timestamp }}</td>
+                    <td class="evento">{{ r.evento }}</td>
+                    <td>{{ r.usuario or '—' }}</td>
+                    <td>{{ r.cliente or '—' }}</td>
+                    <td>{{ r.tipo_processo or '—' }}</td>
+                    <td class="msg">
+                        {% if r.tipo_erro %}<strong style="color: var(--vermelho)">[{{ r.tipo_erro }}]</strong><br>{% endif %}
+                        {{ r.arquivos or '—' }}
+                    </td>
+                    <td class="msg">
+                        {{ r.mensagem or '—' }}
+                        {% if r.total_documentos %}<br><em>{{ r.total_documentos }} doc(s)</em>{% endif %}
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        {% else %}
+        <div class="empty">
+            Nenhum evento registrado no período selecionado.<br>
+            <small>O SQLite local começou a persistir a partir do deploy de 25/04 — eventos anteriores foram perdidos pelo n8n.</small>
+        </div>
+        {% endif %}
+    </div>
+
+</div>
+</body>
+</html>

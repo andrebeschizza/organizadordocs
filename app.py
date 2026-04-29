@@ -15,11 +15,13 @@ import time
 import base64
 import shutil
 import logging
+import sqlite3
 import zipfile
 import tempfile
 import unicodedata
+import threading
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timedelta
 
 # Logging persistente em stdout — Render captura e mantem por 7 dias.
 # Pode ser auditado via Render Dashboard > Logs sempre que precisar.
@@ -29,6 +31,95 @@ logging.basicConfig(
     handlers=[logging.StreamHandler(sys.stdout)],
 )
 audit_log = logging.getLogger("audit")
+
+# ============ SQLite local pra auditoria persistente ============
+# /tmp pode ser zerado em deploys, mas sobrevive a restarts do worker.
+# Para persistencia real entre deploys, migrar pra VPS (#4.2) ou usar
+# servico externo (Sentry, Logflare, etc).
+AUDIT_DB_PATH = Path(tempfile.gettempdir()) / "organizador-audit.db"
+_audit_lock = threading.Lock()
+
+
+def _audit_init_db():
+    """Cria tabela de auditoria se nao existir."""
+    try:
+        with _audit_lock:
+            conn = sqlite3.connect(str(AUDIT_DB_PATH))
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS audit_log (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp TEXT NOT NULL,
+                    evento TEXT NOT NULL,           -- 'INICIO' | 'SUCESSO' | 'ERRO'
+                    usuario TEXT,
+                    cliente TEXT,
+                    tipo_processo TEXT,
+                    arquivos TEXT,                  -- nomes (csv)
+                    total_documentos INTEGER,
+                    tipo_erro TEXT,
+                    mensagem TEXT,
+                    detalhes TEXT                   -- JSON livre
+                )
+            """)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_timestamp ON audit_log(timestamp)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_evento ON audit_log(evento)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_usuario ON audit_log(usuario)")
+            conn.commit()
+            conn.close()
+    except Exception as e:
+        # Falha na inicializacao do DB nao deve quebrar o app
+        print(f"AUDIT_DB_INIT_ERROR: {e}", file=sys.stderr)
+
+
+def audit_save(evento, usuario=None, cliente=None, tipo_processo=None,
+              arquivos=None, total_documentos=0, tipo_erro=None, mensagem=None,
+              detalhes=None):
+    """Salva uma linha de auditoria no SQLite local + stdout."""
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    arq_str = ""
+    if arquivos:
+        if isinstance(arquivos, (list, tuple)):
+            arq_str = ",".join(str(a)[:50] for a in arquivos)[:1000]
+        else:
+            arq_str = str(arquivos)[:1000]
+    msg = (str(mensagem)[:500] if mensagem else "")
+    det = json.dumps(detalhes, ensure_ascii=False)[:2000] if detalhes else None
+
+    try:
+        with _audit_lock:
+            conn = sqlite3.connect(str(AUDIT_DB_PATH))
+            conn.execute(
+                "INSERT INTO audit_log(timestamp, evento, usuario, cliente, tipo_processo, "
+                "arquivos, total_documentos, tipo_erro, mensagem, detalhes) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (ts, evento, usuario, cliente, tipo_processo, arq_str,
+                 int(total_documentos or 0), tipo_erro, msg, det),
+            )
+            conn.commit()
+            conn.close()
+    except Exception as e:
+        print(f"AUDIT_DB_INSERT_ERROR: {e}", file=sys.stderr)
+
+
+def audit_query(dias=7, limit=500):
+    """Le ultimos N dias do SQLite. Retorna lista de dicts."""
+    try:
+        with _audit_lock:
+            conn = sqlite3.connect(str(AUDIT_DB_PATH))
+            conn.row_factory = sqlite3.Row
+            cutoff = (datetime.now() - timedelta(days=dias)).strftime("%Y-%m-%d %H:%M:%S")
+            rows = conn.execute(
+                "SELECT * FROM audit_log WHERE timestamp >= ? ORDER BY timestamp DESC LIMIT ?",
+                (cutoff, limit),
+            ).fetchall()
+            conn.close()
+            return [dict(r) for r in rows]
+    except Exception as e:
+        print(f"AUDIT_DB_READ_ERROR: {e}", file=sys.stderr)
+        return []
+
+
+# Inicializa DB no startup
+_audit_init_db()
 
 from flask import Flask, render_template, request, jsonify, send_file, Response, stream_with_context
 
@@ -1244,6 +1335,17 @@ def registrar_uso(usuario, nome_cliente, tipo_processo, total_docs, status):
         status,
     )
 
+    # 1.5) PERSISTENCIA LOCAL (SQLite) — sobrevive restart do worker
+    evento = "ERRO" if (status or "").startswith("ERRO[") or (status or "").startswith("erro:") else "SUCESSO"
+    audit_save(
+        evento=evento,
+        usuario=usuario,
+        cliente=nome_cliente,
+        tipo_processo=TIPOS_PROCESSO.get(tipo_processo, tipo_processo or ""),
+        total_documentos=total_docs,
+        mensagem=status,
+    )
+
     # 2) WEBHOOK (n8n -> Google Sheets) — pode falhar silenciosamente
     if not LOG_WEBHOOK_URL:
         return
@@ -1284,6 +1386,17 @@ def registrar_erro(usuario, nome_cliente, tipo_processo, arquivo, tipo_erro, men
         TIPOS_PROCESSO.get(tipo_processo, tipo_processo or ""),
         arq,
         msg_limpa,
+    )
+
+    # PERSISTENCIA LOCAL — informacao detalhada do erro vai pro SQLite
+    audit_save(
+        evento="ERRO",
+        usuario=usuario,
+        cliente=nome_cliente,
+        tipo_processo=TIPOS_PROCESSO.get(tipo_processo, tipo_processo or ""),
+        arquivos=arquivo,
+        tipo_erro=tipo_erro,
+        mensagem=msg_limpa,
     )
 
     # Tambem escreve na planilha (via webhook) — pode falhar silenciosamente
@@ -1671,6 +1784,15 @@ def processar_stream():
         usuario, nome_cliente, tipo_processo,
         len(arquivos_para_processar),
         ",".join(a[0] for a in arquivos_para_processar)[:500],
+    )
+    # Persiste no SQLite local
+    audit_save(
+        evento="INICIO",
+        usuario=usuario,
+        cliente=nome_cliente,
+        tipo_processo=TIPOS_PROCESSO.get(tipo_processo, tipo_processo),
+        arquivos=[a[0] for a in arquivos_para_processar],
+        total_documentos=len(arquivos_para_processar),
     )
 
     @stream_with_context
@@ -2517,6 +2639,55 @@ def admin_api_metricas():
         return _auth_required()
     linhas = _ler_planilha_csv()
     return jsonify(_calcular_metricas(linhas))
+
+
+@app.route("/admin/audit")
+def admin_audit():
+    """Auditoria local (SQLite) — sobrevive mesmo se o n8n estiver quebrado.
+    Mostra todos os eventos (INICIO, SUCESSO, ERRO) dos ultimos N dias.
+    Filtros: ?dias=N (default 7), ?evento=ERRO|INICIO|SUCESSO, ?usuario=X
+    """
+    auth = request.authorization
+    if not _check_auth(auth):
+        return _auth_required()
+
+    dias = int(request.args.get("dias", "7"))
+    filtro_evento = request.args.get("evento", "").upper().strip()
+    filtro_usuario = request.args.get("usuario", "").strip()
+
+    todos = audit_query(dias=dias, limit=2000)
+    if filtro_evento:
+        todos = [r for r in todos if (r.get("evento") or "").upper() == filtro_evento]
+    if filtro_usuario:
+        todos = [r for r in todos if (r.get("usuario") or "").lower() == filtro_usuario.lower()]
+
+    # Resumo rapido
+    from collections import Counter
+    eventos_count = Counter(r.get("evento") for r in todos)
+    erros_por_tipo = Counter(r.get("tipo_erro") for r in todos if r.get("evento") == "ERRO" and r.get("tipo_erro"))
+    usuarios_count = Counter(r.get("usuario") for r in todos if r.get("usuario"))
+
+    return render_template(
+        "admin_audit.html",
+        registros=todos,
+        eventos_count=dict(eventos_count),
+        erros_por_tipo=erros_por_tipo.most_common(),
+        usuarios_count=usuarios_count.most_common(),
+        dias=dias,
+        filtro_evento=filtro_evento,
+        filtro_usuario=filtro_usuario,
+        total=len(todos),
+    )
+
+
+@app.route("/admin/audit.json")
+def admin_audit_json():
+    """Versao JSON do audit pra integracoes."""
+    auth = request.authorization
+    if not _check_auth(auth):
+        return _auth_required()
+    dias = int(request.args.get("dias", "7"))
+    return jsonify(audit_query(dias=dias, limit=5000))
 
 
 if __name__ == "__main__":
