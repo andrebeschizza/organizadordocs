@@ -191,6 +191,8 @@ Use EXATAMENTE um destes tipos (escreva identico, sem traduzir):
 - Relatorio de Assinaturas            (relatorio ZapSign com assinantes e tokens)
 - Comunicacao de Decisao              (documento DO INSS com decisao sobre beneficio)
 - Carta Indeferimento INSS
+- Peticao Inicial                     (peticao do advogado iniciando o processo judicial)
+- Calculo do Valor da Causa           (planilha/documento com calculo do valor pedido)
 - RG
 - CPF
 - CNH
@@ -207,6 +209,7 @@ Use EXATAMENTE um destes tipos (escreva identico, sem traduzir):
 - Certidao de Nascimento
 - Certidao de Obito
 - Termo de Homologacao Atividade Rural
+- Despacho Decisorio                  (decisao administrativa que considerou periodo de Segurado Especial)
 - Documentos Rurais
 - Folha V7
 - Declaracao Tempo de Servico
@@ -221,8 +224,10 @@ Use EXATAMENTE um destes tipos (escreva identico, sem traduzir):
 - Foto de Residencia
 - Avaliacao Social
 - Pericia Medica
+- Quadro de Informacoes da Avaliacao Social e Pericia Medica
 - Contagem de Tempo
-- Calculo Renda Mensal
+- Calculo Regras Transicao
+- Calculo da Renda Mensal Inicial     (RMI)
 - Copia Processo Administrativo
 - Certidao Negativa Justica Estadual
 - Protocolo de Requerimento INSS      (formulario de pedido de beneficio no MeuINSS)
@@ -261,15 +266,19 @@ IMPORTANTE: Responda SEMPRE em portugues brasileiro, nunca em ingles.
 
 Extraia:
 1. Tipo do documento. Use EXATAMENTE um destes (copiar identico):
-   Procuracao, Substabelecimento, Declaracao de Hipossuficiencia, Declaracao de Residencia,
-   Declaracao de Beneficios INSS, Declaracao, Contrato de Honorarios, Termo de Responsabilidade,
-   Termo de Representacao, Protocolo de Assinatura, Relatorio de Assinaturas, Comunicacao de Decisao,
+   Peticao Inicial, Calculo do Valor da Causa, Procuracao, Substabelecimento,
+   Declaracao de Hipossuficiencia, Declaracao de Residencia, Declaracao de Beneficios INSS,
+   Declaracao, Contrato de Honorarios, Termo de Responsabilidade, Termo de Representacao,
+   Protocolo de Assinatura, Relatorio de Assinaturas, Comunicacao de Decisao,
    Carta Indeferimento INSS, RG, CPF, CNH, CNIS, CTPS, Atestado Medico, Relatorio Medico,
    Receita Medica, Exame Medico, Laudo Medico, Laudo MeuINSS, Certidao de Casamento,
-   Certidao de Nascimento, Certidao de Obito, Documentos Rurais, Folha V7, Declaracao Tempo Servico,
-   Ficha Funcionario, Certidao Tempo Servico, Ficha Financeira, PPP, LTCAT, GPS,
-   Comprovante Residencia, Comprovante Gasto, Foto Residencia, Protocolo de Requerimento INSS,
-   Print TRF, Pericia Medica
+   Certidao de Nascimento, Certidao de Obito, Documentos Rurais, Folha V7,
+   Termo de Homologacao Atividade Rural, Despacho Decisorio,
+   Declaracao Tempo Servico, Ficha Funcionario, Certidao Tempo Servico, Ficha Financeira,
+   PPP, LTCAT, GPS, Comprovante Residencia, Comprovante Gasto, Foto Residencia,
+   Protocolo de Requerimento INSS, Print TRF, Pericia Medica,
+   Quadro de Informacoes Avaliacao Social, Contagem de Tempo, Calculo Regras Transicao,
+   Calculo RMI, Copia Processo Administrativo, Certidao Negativa Justica Estadual
 2. Data de emissao/expedicao DO DOCUMENTO (procure no TOPO, RODAPE ou DATA EXPLICITA no texto).
    Formatos possiveis: DD/MM/YYYY, DD-MM-YYYY, "14 de Marco de 2026", YYYY-MM-DD.
    NAO use a data atual nem data de impressao do sistema.
@@ -289,7 +298,13 @@ Se nao encontrar data, use "data": null.
 PROMPT_MAPEAMENTO_CURTO = """Identifique os documentos nestas paginas de PDF juridico brasileiro.
 
 IMPORTANTE: Responda SEMPRE em portugues brasileiro. Uma procuracao de 3 paginas e UMA procuracao (nao 3).
-Tipos permitidos: Procuracao, Substabelecimento, Declaracao de Hipossuficiencia, Declaracao, Contrato de Honorarios, Termo de Responsabilidade, Termo de Representacao, Protocolo de Assinatura, RG, CPF, CNH, CNIS, CTPS, Atestado Medico, Relatorio Medico, Receita Medica, Exame Medico, Laudo, Certidao, PPP, LTCAT, GPS, Comprovante Residencia, Comprovante Gasto.
+Tipos permitidos: Peticao Inicial, Calculo do Valor da Causa, Procuracao, Substabelecimento,
+Declaracao de Hipossuficiencia, Declaracao, Contrato de Honorarios, Termo de Responsabilidade,
+Termo de Representacao, Protocolo de Assinatura, Comunicacao de Decisao, Carta Indeferimento INSS,
+RG, CPF, CNH, CNIS, CTPS, Atestado Medico, Relatorio Medico, Receita Medica, Exame Medico,
+Laudo, Certidao, Despacho Decisorio, PPP, LTCAT, GPS, Comprovante Residencia, Comprovante Gasto,
+Quadro de Informacoes Avaliacao Social, Contagem de Tempo, Calculo Regras Transicao, Calculo RMI,
+Copia Processo Administrativo, Certidao Negativa Justica Estadual.
 
 Para cada documento, indique: tipo, pagina de inicio, pagina de fim, data de emissao (do texto, nao hoje).
 
@@ -529,36 +544,39 @@ SEQUENCIA_INSS_ADMIN = [
 ]
 
 # Sequencia detalhada para Processos Judiciais
+# Ordem definida pelo time juridico (Andre, 29/04/2026):
 SEQUENCIA_JUDICIAL = [
-    ("procuracao", "Procuracao"),
-    ("substabelecimento", "Substabelecimento"),
-    ("declaracao_hipossuficiencia", "Declaracao_de_Hipossuficiencia"),
-    ("documento_pessoal", None),
-    ("carta_indeferimento", "Carta_Indeferimento_INSS"),
-    ("cnis", "CNIS"),
-    ("ctps", "CTPS"),
-    ("atestados_relatorios_receitas", "Atestados_Relatorios_Receitas_Medicas"),
-    ("exames_medicos", "Exames_Medicos"),
-    ("laudo_meuinss", "Laudo_MeuINSS"),
-    ("documentos_rurais", "Documentos_Rurais"),
-    ("folha_v7", "Folha_V7"),
-    ("certidoes", "Certidoes"),
-    ("termo_homologacao_rural", "Termo_Homologacao_Atividade_Rural"),
-    ("declaracao_tempo_servico", "Declaracao_Tempo_Servico_Ficha_Funcionario"),
-    ("certidao_tempo_servico", "Certidao_Tempo_Servico"),
-    ("ficha_financeira", "Ficha_Financeira"),
-    ("ppp", "PPP"),
-    ("ltcat", "LTCAT"),
-    ("gps", "GPS"),
-    ("comprovante_gasto", "Comprovantes_Gastos"),
-    ("foto_residencia", "Fotos_Residencia"),
-    ("avaliacao_social_pericia", "Avaliacao_Social_Pericia_Medica"),
-    ("contagem_tempo", "Contagem_Tempo"),
-    ("calculo_regras_transicao", "Calculo_Regras_Transicao"),
-    ("calculo_rmi", "Calculo_RMI"),
-    ("copia_processo_administrativo", "Copia_Processo_Administrativo"),
-    ("certidao_negativa_estadual", "Certidao_Negativa_Justica_Estadual"),
-    ("comprovante_residencia", "Comprovante_Residencia"),
+    ("peticao_inicial", "Peticao_Inicial"),                                      # 01
+    ("calculo_valor_causa", "Calculo_Valor_da_Causa"),                           # 02
+    ("procuracao", "Procuracao"),                                                # 03
+    ("substabelecimento", "Substabelecimento"),                                  # 04
+    ("declaracao_hipossuficiencia", "Declaracao_de_Hipossuficiencia"),           # 05
+    ("documento_pessoal", "RG_do_Autor"),                                        # 06
+    ("carta_indeferimento", "Carta_Indeferimento_INSS"),                         # 07
+    ("cnis", "CNIS"),                                                            # 08
+    ("ctps", "CTPS"),                                                            # 09
+    ("atestados_relatorios_receitas", "Atestados_Relatorios_Receitas_Medicas"),  # 10
+    ("exames_medicos", "Exames_Medicos"),                                        # 11
+    ("laudo_meuinss", "Laudo_MeuINSS"),                                          # 12
+    ("documentos_rurais", "Documentos_Rurais"),                                  # 13
+    ("folha_v7", "Folha_V7"),                                                    # 14
+    ("certidoes", "Certidoes"),                                                  # 15
+    ("termo_homologacao_rural", "Termo_Homologacao_Atividade_Rural"),            # 16 (inclui Despacho Decisorio)
+    ("declaracao_tempo_servico", "Declaracao_Tempo_Servico_Ficha_Funcionario"),  # 17
+    ("certidao_tempo_servico", "Certidao_Tempo_Servico"),                        # 18
+    ("ficha_financeira", "Ficha_Financeira"),                                    # 19
+    ("ppp", "PPP"),                                                              # 20
+    ("ltcat", "LTCAT"),                                                          # 21
+    ("gps", "GPS"),                                                              # 22
+    ("comprovante_gasto", "Comprovantes_Gastos"),                                # 23
+    ("foto_residencia", "Fotos_Residencia"),                                     # 24
+    ("avaliacao_social_pericia", "Avaliacao_Social_Pericia_Medica"),             # 25 (Quadro de Informacoes)
+    ("contagem_tempo", "Contagem_Tempo"),                                        # 26
+    ("calculo_regras_transicao", "Calculo_Regras_Transicao"),                    # 27
+    ("calculo_rmi", "Calculo_RMI"),                                              # 28
+    ("copia_processo_administrativo", "Copia_Processo_Administrativo"),          # 29
+    ("certidao_negativa_estadual", "Certidao_Negativa_Justica_Estadual"),        # 30
+    ("comprovante_residencia", "Comprovante_Residencia"),                        # 31
 ]
 
 # Categorias que devem ser MERGED em um unico PDF (em ordem cronologica)
@@ -1171,6 +1189,24 @@ def eh_protocolo_assinatura(r):
 def classificar_doc(r, tipo_processo):
     """Retorna a categoria do doc para ordenacao baseada no tipo de processo."""
     tipo = limpar_nome(r.get("tipo", ""))
+
+    # === DOCS JUDICIAIS NOVOS (precedencia maxima) ===
+    # Peticao Inicial
+    if "peticao" in tipo and "inicial" in tipo:
+        return "peticao_inicial"
+    if tipo == "inicial":
+        return "peticao_inicial"
+    # Calculo do valor da causa
+    if "calculo" in tipo and "valor" in tipo and "causa" in tipo:
+        return "calculo_valor_causa"
+    if "valor" in tipo and "causa" in tipo:
+        return "calculo_valor_causa"
+    # Despacho decisorio (segundo Andre, vai com Termo de Homologacao Rural)
+    if "despacho" in tipo and ("decisorio" in tipo or "decisao" in tipo):
+        return "termo_homologacao_rural"
+    # Quadro de informacoes da avaliacao social / pericia medica
+    if "quadro" in tipo and ("avaliacao" in tipo or "pericia" in tipo or "informacoes" in tipo):
+        return "avaliacao_social_pericia"
 
     # Protocolo de assinatura digital (inclui "Relatorio de Assinaturas" do ZapSign, etc)
     if "protocolo" in tipo and "assinatura" in tipo:

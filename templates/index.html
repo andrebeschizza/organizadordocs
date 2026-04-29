@@ -780,27 +780,38 @@
     // REVISAO MANUAL (#2.2)
     // =========================================================
 
-    // Lista de tipos disponiveis no dropdown (ordem alfabetica)
+    // Lista de tipos disponiveis no dropdown (ordem da sequencia judicial)
     const TIPOS_DOCUMENTOS = [
+        // Documentos judiciais (especificos)
+        "Peticao Inicial",
+        "Calculo do Valor da Causa",
+        // Procuracao + assinaturas
         "Procuracao",
         "Substabelecimento",
         "Termo de Representacao",
         "Termo de Responsabilidade",
         "Protocolo de Assinatura",
         "Relatorio de Assinaturas",
+        // Declaracoes
         "Declaracao de Hipossuficiencia",
         "Declaracao de Residencia",
         "Declaracao de Beneficios INSS",
         "Declaracao",
+        // Contrato (sigiloso no admin)
         "Contrato de Honorarios",
+        // Documentos pessoais
         "RG",
         "CPF",
         "CNH",
         "Documento de Identidade",
-        "CNIS",
-        "CTPS",
+        // INSS / decisoes
         "Comunicacao de Decisao",
         "Carta Indeferimento INSS",
+        "Despacho Decisorio",
+        // Trabalhistas / previdenciarios
+        "CNIS",
+        "CTPS",
+        // Medicos
         "Atestado Medico",
         "Relatorio Medico",
         "Receita Medica",
@@ -808,21 +819,35 @@
         "Laudo Medico",
         "Laudo MeuINSS",
         "Pericia Medica",
+        "Quadro de Informacoes Avaliacao Social",
+        // Certidoes
         "Certidao de Casamento",
         "Certidao de Nascimento",
         "Certidao de Obito",
+        "Certidao Tempo Servico",
+        "Certidao Negativa Justica Estadual",
+        // Rurais
         "Documentos Rurais",
+        "Termo de Homologacao Atividade Rural",
+        // Tempo de servico
         "Folha V7",
         "Declaracao Tempo Servico",
         "Ficha Funcionario",
-        "Certidao Tempo Servico",
         "Ficha Financeira",
+        // Tecnicos
         "PPP",
         "LTCAT",
         "GPS",
+        // Comprovantes
         "Comprovante Residencia",
         "Comprovante Gasto",
         "Foto Residencia",
+        // Calculos / contagens
+        "Contagem de Tempo",
+        "Calculo Regras Transicao",
+        "Calculo RMI",
+        // Outros
+        "Copia Processo Administrativo",
         "Print TRF",
         "Protocolo de Requerimento INSS",
         "desconhecido",
