@@ -2605,13 +2605,29 @@ def _calcular_metricas(linhas):
         if (l.get("status") or "").lower() == "sucesso":
             por_tipo[l.get("tipo_processo") or "desconhecido"] += 1
 
-    # Erros recentes (ultimos 20)
+    # Erros recentes (ultimos 20) — exclui FEEDBACK que comeca com FEEDBACK[
     erros_lista = [
         l for l in linhas
-        if (l.get("status") or "").startswith("ERRO[") or (l.get("status") or "").startswith("erro:")
+        if ((l.get("status") or "").startswith("ERRO[") or (l.get("status") or "").startswith("erro:"))
+        and not (l.get("status") or "").startswith("FEEDBACK[")
     ]
     erros_lista.sort(key=lambda l: l.get("timestamp") or "", reverse=True)
     erros_recentes = erros_lista[:20]
+
+    # Feedbacks recentes (ultimos 30)
+    feedback_lista = [
+        l for l in linhas
+        if (l.get("status") or "").startswith("FEEDBACK[")
+    ]
+    feedback_lista.sort(key=lambda l: l.get("timestamp") or "", reverse=True)
+    feedbacks_recentes = feedback_lista[:30]
+    # Conta por tipo
+    feedback_por_tipo = Counter()
+    for f in feedback_lista:
+        status = f.get("status") or ""
+        m = re.match(r"FEEDBACK\[(\w+)\]", status)
+        if m:
+            feedback_por_tipo[m.group(1)] += 1
 
     # Total de documentos processados (soma do campo)
     total_docs = 0
@@ -2636,6 +2652,9 @@ def _calcular_metricas(linhas):
         "por_usuario": por_usuario.most_common(),
         "por_tipo": por_tipo.most_common(),
         "erros_recentes": erros_recentes,
+        "feedbacks_recentes": feedbacks_recentes,
+        "feedback_por_tipo": feedback_por_tipo.most_common(),
+        "total_feedbacks": len(feedback_lista),
         "total_documentos": total_docs,
         "custo_estimado_total": custo_estimado,
         "custo_estimado_mes": custo_mes_atual,
@@ -2675,6 +2694,75 @@ def admin_api_metricas():
         return _auth_required()
     linhas = _ler_planilha_csv()
     return jsonify(_calcular_metricas(linhas))
+
+
+# ============ SISTEMA DE FEEDBACK IN-APP ============
+
+TIPOS_FEEDBACK = ["bug", "sugestao", "elogio", "duvida"]
+
+
+@app.route("/feedback", methods=["POST"])
+def receber_feedback():
+    """Recebe feedback do usuario (botao flutuante in-app).
+    Body JSON: {tipo, descricao, usuario, contexto?}
+      contexto opcional: {cliente, tipo_processo, total_docs, browser, url, etc}
+    """
+    try:
+        body = request.get_json(silent=True) or {}
+        tipo = (body.get("tipo") or "").strip().lower()
+        descricao = (body.get("descricao") or "").strip()
+        usuario = (body.get("usuario") or "anonimo").strip()
+        contexto = body.get("contexto") or {}
+
+        if tipo not in TIPOS_FEEDBACK:
+            return jsonify({"erro": f"tipo invalido. Use: {', '.join(TIPOS_FEEDBACK)}"}), 400
+        if not descricao or len(descricao) < 3:
+            return jsonify({"erro": "descricao muito curta (min 3 chars)"}), 400
+        if len(descricao) > 2000:
+            return jsonify({"erro": "descricao muito longa (max 2000 chars)"}), 400
+
+        # Sanitiza contexto pra string compacta
+        ctx_str = ""
+        if isinstance(contexto, dict):
+            partes = []
+            for k in ("cliente", "tipo_processo", "total_docs", "browser", "url"):
+                v = contexto.get(k)
+                if v:
+                    partes.append(f"{k}={str(v)[:80]}")
+            ctx_str = " | ".join(partes)
+
+        # Mensagem unica que vai pra logs/planilha
+        msg = f"FEEDBACK[{tipo}] {descricao[:300]}"
+        if ctx_str:
+            msg += f" || ctx: {ctx_str[:300]}"
+
+        # 1) Log estruturado em stdout (Render captura)
+        audit_log.info(
+            "FEEDBACK[%s] | usuario=%s | desc=%s | ctx=%s",
+            tipo, usuario, descricao[:200], ctx_str[:200],
+        )
+
+        # 2) SQLite local
+        audit_save(
+            evento="FEEDBACK",
+            usuario=usuario,
+            cliente=contexto.get("cliente") if isinstance(contexto, dict) else None,
+            tipo_processo=contexto.get("tipo_processo") if isinstance(contexto, dict) else None,
+            tipo_erro=tipo,
+            mensagem=descricao[:500],
+            detalhes=contexto if isinstance(contexto, dict) else None,
+        )
+
+        # 3) Planilha Sheets via webhook (mesmo destino, prefixo FEEDBACK)
+        registrar_uso(usuario, contexto.get("cliente") if isinstance(contexto, dict) else "",
+                     contexto.get("tipo_processo") if isinstance(contexto, dict) else "",
+                     0, msg)
+
+        return jsonify({"sucesso": True, "mensagem": "Feedback recebido. Obrigado!"})
+
+    except Exception as e:
+        audit_log.error("FEEDBACK_ERROR | %s", e)
+        return jsonify({"erro": str(e)}), 500
 
 
 @app.route("/admin/audit")

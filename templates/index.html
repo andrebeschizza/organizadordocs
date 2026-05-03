@@ -543,6 +543,152 @@
             color: #a0aec0;
         }
 
+        /* FEEDBACK BOTAO FLUTUANTE */
+        .fb-btn-flutuante {
+            position: fixed;
+            bottom: 20px;
+            right: 20px;
+            background: linear-gradient(135deg, var(--azul) 0%, var(--azul-claro) 100%);
+            color: white;
+            border: none;
+            border-radius: 50px;
+            padding: 14px 20px;
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+            box-shadow: 0 6px 20px rgba(26,58,92,0.35);
+            z-index: 150;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            transition: transform 0.15s, box-shadow 0.15s;
+        }
+        .fb-btn-flutuante:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 8px 24px rgba(26,58,92,0.45);
+        }
+        .fb-btn-flutuante:active { transform: translateY(0); }
+
+        .fb-overlay {
+            display: none;
+            position: fixed;
+            inset: 0;
+            background: rgba(0,0,0,0.6);
+            z-index: 250;
+            align-items: center;
+            justify-content: center;
+            padding: 16px;
+        }
+        .fb-overlay.show { display: flex; }
+        .fb-modal {
+            background: white;
+            border-radius: 16px;
+            padding: 24px;
+            width: 100%;
+            max-width: 480px;
+            max-height: 90vh;
+            overflow-y: auto;
+            box-shadow: 0 20px 50px rgba(0,0,0,0.3);
+        }
+        .fb-modal h3 {
+            font-size: 18px;
+            color: var(--azul);
+            margin-bottom: 4px;
+        }
+        .fb-modal .fb-sub {
+            font-size: 13px;
+            color: var(--cinza-texto);
+            margin-bottom: 18px;
+        }
+        .fb-tipos {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 8px;
+            margin-bottom: 16px;
+        }
+        .fb-tipo {
+            padding: 12px 8px;
+            border: 2px solid var(--cinza-borda);
+            border-radius: 10px;
+            cursor: pointer;
+            background: white;
+            text-align: center;
+            font-size: 13px;
+            font-weight: 600;
+            color: var(--cinza-texto);
+            transition: all 0.15s;
+        }
+        .fb-tipo:hover { border-color: var(--azul-claro); }
+        .fb-tipo.selecionado {
+            background: #ebf4ff;
+            border-color: var(--azul-claro);
+            color: var(--azul);
+        }
+        .fb-tipo .emoji { font-size: 22px; display: block; margin-bottom: 4px; }
+        .fb-textarea {
+            width: 100%;
+            min-height: 110px;
+            padding: 12px;
+            border: 2px solid var(--cinza-borda);
+            border-radius: 10px;
+            font-family: inherit;
+            font-size: 14px;
+            resize: vertical;
+            background: var(--cinza-bg);
+            color: #2d3748;
+        }
+        .fb-textarea:focus {
+            outline: none;
+            border-color: var(--azul-claro);
+            background: white;
+        }
+        .fb-context {
+            background: #f7fafc;
+            border: 1px dashed var(--cinza-borda);
+            padding: 10px 12px;
+            border-radius: 8px;
+            margin-top: 12px;
+            font-size: 11px;
+            color: #718096;
+            line-height: 1.5;
+        }
+        .fb-actions {
+            display: flex;
+            gap: 8px;
+            margin-top: 16px;
+        }
+        .fb-actions button {
+            flex: 1;
+            padding: 12px;
+            border: none;
+            border-radius: 10px;
+            font-size: 14px;
+            font-weight: 700;
+            cursor: pointer;
+        }
+        .fb-actions .fb-cancel {
+            background: var(--cinza-bg);
+            color: var(--cinza-texto);
+            border: 2px solid var(--cinza-borda);
+        }
+        .fb-actions .fb-send {
+            background: linear-gradient(135deg, var(--verde) 0%, var(--verde-claro) 100%);
+            color: white;
+        }
+        .fb-actions .fb-send:disabled {
+            background: #cbd5e0;
+            cursor: not-allowed;
+        }
+        .fb-msg-ok {
+            background: #c6f6d5;
+            color: #22543d;
+            padding: 12px;
+            border-radius: 8px;
+            font-size: 13px;
+            text-align: center;
+            margin-top: 12px;
+        }
+
         /* DESKTOP */
         @media (min-width: 768px) {
             .container { max-width: 560px; padding: 24px; }
@@ -672,6 +818,38 @@
 
     <div class="footer">
         Organizador Juridico — AB Group
+    </div>
+</div>
+
+<!-- BOTAO FLUTUANTE DE FEEDBACK -->
+<button class="fb-btn-flutuante" id="fbBtnAbrir" title="Reportar bug, sugerir melhoria ou tirar duvida">
+    💬 Feedback
+</button>
+
+<!-- MODAL DE FEEDBACK -->
+<div class="fb-overlay" id="fbOverlay">
+    <div class="fb-modal">
+        <h3>💬 Sua opiniao importa</h3>
+        <div class="fb-sub">Reporte erros, sugira melhorias ou tire duvidas. A gente le tudo.</div>
+
+        <div class="fb-tipos" id="fbTipos">
+            <div class="fb-tipo" data-tipo="bug"><span class="emoji">🐛</span>Bug / Erro</div>
+            <div class="fb-tipo" data-tipo="sugestao"><span class="emoji">💡</span>Sugestao</div>
+            <div class="fb-tipo" data-tipo="elogio"><span class="emoji">👍</span>Funcionou bem</div>
+            <div class="fb-tipo" data-tipo="duvida"><span class="emoji">❓</span>Duvida</div>
+        </div>
+
+        <textarea class="fb-textarea" id="fbDescricao"
+            placeholder="O que aconteceu? Quanto mais detalhes, melhor (ex: cliente Maria Silva, processo Judicial, ao processar deu erro X na hora Y)"></textarea>
+
+        <div class="fb-context" id="fbContext"></div>
+
+        <div id="fbResultado"></div>
+
+        <div class="fb-actions">
+            <button class="fb-cancel" id="fbCancelar">Cancelar</button>
+            <button class="fb-send" id="fbEnviar" disabled>Enviar feedback</button>
+        </div>
     </div>
 </div>
 
@@ -1241,6 +1419,112 @@
         docsRevisao = [];
         atualizarLista();
         erro.classList.remove('show');
+    });
+
+    // ========================================================
+    // SISTEMA DE FEEDBACK IN-APP
+    // ========================================================
+    const fbBtnAbrir = document.getElementById('fbBtnAbrir');
+    const fbOverlay = document.getElementById('fbOverlay');
+    const fbCancelar = document.getElementById('fbCancelar');
+    const fbEnviar = document.getElementById('fbEnviar');
+    const fbDescricao = document.getElementById('fbDescricao');
+    const fbContext = document.getElementById('fbContext');
+    const fbResultado = document.getElementById('fbResultado');
+    const fbTipos = document.getElementById('fbTipos');
+    let fbTipoSelecionado = null;
+
+    // Captura ultimo processamento da localStorage / variaveis globais
+    function fbCapturaContexto() {
+        const usuario = document.getElementById('usuario').value || localStorage.getItem('usuario_organizador') || 'anonimo';
+        const cliente = document.getElementById('nome_cliente').value || (sessaoAtual ? sessaoAtual.nomePastaDireto : '');
+        const tipoProcesso = document.getElementById('tipo_processo').value || '';
+        const ua = navigator.userAgent.substring(0, 120);
+        const url = window.location.pathname;
+        return { usuario, cliente, tipo_processo: tipoProcesso, browser: ua, url };
+    }
+
+    function fbAtualizaContextoVisual() {
+        const ctx = fbCapturaContexto();
+        const partes = [];
+        if (ctx.usuario && ctx.usuario !== 'anonimo') partes.push(`👤 ${ctx.usuario}`);
+        if (ctx.cliente) partes.push(`📁 cliente: ${ctx.cliente}`);
+        if (ctx.tipo_processo) partes.push(`📋 tipo: ${ctx.tipo_processo}`);
+        fbContext.innerHTML = partes.length
+            ? `<strong>Vou enviar junto:</strong><br>${partes.join(' • ')}`
+            : '<em>Nenhum contexto detectado. Pode escrever tudo na descricao.</em>';
+    }
+
+    function fbValidaForm() {
+        const ok = fbTipoSelecionado && fbDescricao.value.trim().length >= 3;
+        fbEnviar.disabled = !ok;
+    }
+
+    fbBtnAbrir.addEventListener('click', () => {
+        fbResultado.innerHTML = '';
+        fbDescricao.value = '';
+        fbTipoSelecionado = null;
+        document.querySelectorAll('.fb-tipo').forEach(el => el.classList.remove('selecionado'));
+        fbAtualizaContextoVisual();
+        fbValidaForm();
+        fbOverlay.classList.add('show');
+        setTimeout(() => fbDescricao.focus(), 100);
+    });
+
+    fbCancelar.addEventListener('click', () => {
+        fbOverlay.classList.remove('show');
+    });
+
+    // Fecha clicando fora do modal
+    fbOverlay.addEventListener('click', (e) => {
+        if (e.target === fbOverlay) fbOverlay.classList.remove('show');
+    });
+
+    fbTipos.addEventListener('click', (e) => {
+        const tipo = e.target.closest('.fb-tipo');
+        if (!tipo) return;
+        document.querySelectorAll('.fb-tipo').forEach(el => el.classList.remove('selecionado'));
+        tipo.classList.add('selecionado');
+        fbTipoSelecionado = tipo.dataset.tipo;
+        fbValidaForm();
+    });
+
+    fbDescricao.addEventListener('input', fbValidaForm);
+
+    fbEnviar.addEventListener('click', async () => {
+        fbEnviar.disabled = true;
+        fbEnviar.textContent = 'Enviando...';
+        fbResultado.innerHTML = '';
+
+        const payload = {
+            tipo: fbTipoSelecionado,
+            descricao: fbDescricao.value.trim(),
+            usuario: fbCapturaContexto().usuario,
+            contexto: fbCapturaContexto(),
+        };
+
+        try {
+            const resp = await fetch('/feedback', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(payload),
+            });
+            const data = await resp.json();
+            if (data.erro) {
+                fbResultado.innerHTML = `<div style="background:#fff5f5;color:#742a2a;padding:10px;border-radius:6px;font-size:13px;">❌ ${data.erro}</div>`;
+                fbEnviar.disabled = false;
+                fbEnviar.textContent = 'Enviar feedback';
+                return;
+            }
+            fbResultado.innerHTML = '<div class="fb-msg-ok">✅ Feedback enviado! Obrigado pela contribuicao.</div>';
+            fbEnviar.textContent = 'Enviar feedback';
+            // Fecha modal apos 1.5s
+            setTimeout(() => fbOverlay.classList.remove('show'), 1500);
+        } catch (e) {
+            fbResultado.innerHTML = `<div style="background:#fff5f5;color:#742a2a;padding:10px;border-radius:6px;font-size:13px;">❌ Erro de conexao: ${e.message}</div>`;
+            fbEnviar.disabled = false;
+            fbEnviar.textContent = 'Enviar feedback';
+        }
     });
 </script>
 </body>

@@ -294,6 +294,46 @@
         {% endif %}
     </div>
 
+    <!-- FEEDBACKS DOS USUÁRIOS -->
+    <div class="section">
+        <h2>💬 Feedback dos usuários ({{ m.total_feedbacks }} total)</h2>
+        {% if m.feedback_por_tipo %}
+            <div style="display: flex; gap: 12px; margin-bottom: 16px; flex-wrap: wrap;">
+                {% for tipo, qtd in m.feedback_por_tipo %}
+                    {% set emoji = {'bug': '🐛', 'sugestao': '💡', 'elogio': '👍', 'duvida': '❓'}.get(tipo, '💬') %}
+                    {% set cor = {'bug': '#fed7d7', 'sugestao': '#bee3f8', 'elogio': '#c6f6d5', 'duvida': '#fefcbf'}.get(tipo, '#e2e8f0') %}
+                    <div style="background: {{ cor }}; padding: 8px 14px; border-radius: 8px; font-size: 13px; font-weight: 600;">
+                        {{ emoji }} {{ tipo|capitalize }}: <strong>{{ qtd }}</strong>
+                    </div>
+                {% endfor %}
+            </div>
+        {% endif %}
+        {% if m.feedbacks_recentes %}
+            <table>
+                <thead>
+                    <tr>
+                        <th>Quando</th>
+                        <th>Quem</th>
+                        <th>Tipo</th>
+                        <th>Mensagem</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for f in m.feedbacks_recentes %}
+                    <tr>
+                        <td>{{ f.timestamp }}</td>
+                        <td><strong>{{ f.usuario }}</strong></td>
+                        <td style="font-size: 11px;">{{ f.status[:30] }}</td>
+                        <td style="font-size: 12px;">{{ f.status[30:] if f.status|length > 30 else '' }}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        {% else %}
+            <div class="empty">Nenhum feedback ainda. O botão flutuante "💬 Feedback" aparece pra todos os usuários no app.</div>
+        {% endif %}
+    </div>
+
 {% endif %}
 
     <div class="footer-note">
