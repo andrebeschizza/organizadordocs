@@ -1356,6 +1356,24 @@ def index():
     return render_template("index.html", tipos=TIPOS_PROCESSO, usuarios=USUARIOS)
 
 
+@app.route("/keepalive")
+def keepalive():
+    """Endpoint super leve pra manter o Render free tier acordado.
+    Pingado a cada 10min via GitHub Actions cron. Sem logging desnecessario."""
+    return "ok", 200
+
+
+# Rotas para silenciar scanners (apple, favicon) que poluem os logs
+@app.route("/apple-touch-icon.png")
+@app.route("/apple-touch-icon-precomposed.png")
+@app.route("/apple-touch-icon-120x120.png")
+@app.route("/apple-touch-icon-120x120-precomposed.png")
+@app.route("/favicon.ico")
+@app.route("/robots.txt")
+def silenciar_scanners():
+    return "", 204  # No Content — sem corpo, sem log de erro
+
+
 def registrar_uso(usuario, nome_cliente, tipo_processo, total_docs, status):
     """Envia log de uso/erro para webhook (n8n -> Google Sheets).
     Erros sao diferenciados pelo prefixo 'ERRO[tipo_erro]' no campo status.

@@ -1,0 +1,28 @@
+name: Keep Render Awake
+
+# Pinga o app a cada 10 minutos pra evitar o spin-down do Render free tier.
+# Spin-down acontece apos 15 min sem requests — pingar a cada 10 min mantem acordado.
+# Resolve UX: time nao precisa esperar 30-60s pra app acordar.
+
+on:
+  schedule:
+    # A cada 10 minutos (cron: */10 * * * * roda mas GitHub aceita min 5min)
+    - cron: '*/10 * * * *'
+  workflow_dispatch:  # permite rodar manualmente tambem
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping organizadordocs
+        run: |
+          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+            --max-time 60 \
+            "https://organizadordocs-gegq.onrender.com/keepalive")
+          echo "Response: $HTTP_CODE"
+          if [ "$HTTP_CODE" = "200" ]; then
+            echo "App awake ✓"
+          else
+            echo "Warning: HTTP $HTTP_CODE"
+            exit 0  # Nao falha o workflow — pode ser app acordando
+          fi
